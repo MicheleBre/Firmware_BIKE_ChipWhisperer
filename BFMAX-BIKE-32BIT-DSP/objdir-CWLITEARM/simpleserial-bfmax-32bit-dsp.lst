@@ -1,0 +1,2702 @@
+   1              		.cpu cortex-m4
+   2              		.arch armv7e-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 2
+  11              		.eabi_attribute 34, 1
+  12              		.eabi_attribute 18, 4
+  13              		.file	"simpleserial-bfmax-32bit-dsp.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "simpleserial-bfmax-32bit-dsp.c"
+  18              		.section	.text.cmd_set_key,"ax",%progbits
+  19              		.align	1
+  20              		.p2align 2,,3
+  21              		.global	cmd_set_key
+  22              		.syntax unified
+  23              		.thumb
+  24              		.thumb_func
+  26              	cmd_set_key:
+  27              	.LVL0:
+  28              	.LFB126:
+   1:simpleserial-bfmax-32bit-dsp.c **** #include "hal.h"
+   2:simpleserial-bfmax-32bit-dsp.c **** #include "simpleserial.h"
+   3:simpleserial-bfmax-32bit-dsp.c **** #include "stm32f3xx.h" /* Necessario per le intrinsics DSP SIMD (__USUB8, __SEL) */
+   4:simpleserial-bfmax-32bit-dsp.c **** #include <stdint.h>
+   5:simpleserial-bfmax-32bit-dsp.c **** #include <stdlib.h>
+   6:simpleserial-bfmax-32bit-dsp.c **** #include <string.h>
+   7:simpleserial-bfmax-32bit-dsp.c **** 
+   8:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+   9:simpleserial-bfmax-32bit-dsp.c ****  * PARAMETRI CRITTOGRAFICI SCALATI PER SRAM MICROCONTROLLORE (CW-Lite/STM32)
+  10:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+  11:simpleserial-bfmax-32bit-dsp.c **** #define N0 2
+  12:simpleserial-bfmax-32bit-dsp.c **** #define R_BITS 512
+  13:simpleserial-bfmax-32bit-dsp.c **** #define N_BITS (N0 * R_BITS)
+  14:simpleserial-bfmax-32bit-dsp.c **** #define D_WEIGHT 15          /* Peso della riga sparsa segreta (supp(h)) */
+  15:simpleserial-bfmax-32bit-dsp.c **** #define ITER_MAX_BFMAX 20    /* Numero massimo di iterazioni del decoder */
+  16:simpleserial-bfmax-32bit-dsp.c **** 
+  17:simpleserial-bfmax-32bit-dsp.c **** typedef uint16_t POS_T;
+  18:simpleserial-bfmax-32bit-dsp.c **** 
+  19:simpleserial-bfmax-32bit-dsp.c **** /* Strutture dati: forza l'allineamento a 32-bit per i load/store SIMD */
+  20:simpleserial-bfmax-32bit-dsp.c **** __attribute__((aligned(4))) static uint8_t upc[N_BITS];
+  21:simpleserial-bfmax-32bit-dsp.c **** static uint8_t syndrome_bits[R_BITS];
+  22:simpleserial-bfmax-32bit-dsp.c **** static POS_T Htr_sparse[N0][D_WEIGHT];
+  23:simpleserial-bfmax-32bit-dsp.c **** 
+  24:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+  25:simpleserial-bfmax-32bit-dsp.c ****  * FUNZIONE VULNERABILE 1: argmax_u8_vulnerable (Puro SIMD ARM Cortex-M4)
+  26:simpleserial-bfmax-32bit-dsp.c ****  * Contiene l'early-exit nel secondo ciclo che genera il Timing Leak lineare.
+  27:simpleserial-bfmax-32bit-dsp.c ****  * Sfrutta le istruzioni DSP __USUB8 e __SEL in un singolo ciclo per blocco.
+  28:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+  29:simpleserial-bfmax-32bit-dsp.c **** POS_T __attribute__((noinline)) argmax_u8_vulnerable(const uint8_t *arr, uint16_t len) {
+  30:simpleserial-bfmax-32bit-dsp.c ****     uint32_t max_vec = 0;
+  31:simpleserial-bfmax-32bit-dsp.c ****     const uint32_t *arr32 = (const uint32_t *)arr;
+  32:simpleserial-bfmax-32bit-dsp.c ****     uint16_t len32 = len / 4; 
+  33:simpleserial-bfmax-32bit-dsp.c ****     
+  34:simpleserial-bfmax-32bit-dsp.c ****     /* ---------------------------------------------------------------------
+  35:simpleserial-bfmax-32bit-dsp.c ****      * PASSO 1: Ricerca del massimo assoluto (tempo costante)
+  36:simpleserial-bfmax-32bit-dsp.c ****      * --------------------------------------------------------------------- */
+  37:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+  38:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+  39:simpleserial-bfmax-32bit-dsp.c ****         
+  40:simpleserial-bfmax-32bit-dsp.c ****         /* 1 Ciclo: Sottrae e imposta i flag GE per i 4 byte */
+  41:simpleserial-bfmax-32bit-dsp.c ****         __USUB8(val, max_vec);
+  42:simpleserial-bfmax-32bit-dsp.c ****         
+  43:simpleserial-bfmax-32bit-dsp.c ****         /* 1 Ciclo: Seleziona byte da 'val' se GE=1, altrimenti da 'max_vec' */
+  44:simpleserial-bfmax-32bit-dsp.c ****         max_vec = __SEL(val, max_vec);
+  45:simpleserial-bfmax-32bit-dsp.c ****     }
+  46:simpleserial-bfmax-32bit-dsp.c **** 
+  47:simpleserial-bfmax-32bit-dsp.c ****     /* Estrazione scalare del massimo dal vettore 4-in-1 */
+  48:simpleserial-bfmax-32bit-dsp.c ****     uint8_t *max_bytes = (uint8_t *)&max_vec;
+  49:simpleserial-bfmax-32bit-dsp.c ****     uint8_t max_val = max_bytes[0];
+  50:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[1] > max_val) max_val = max_bytes[1];
+  51:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[2] > max_val) max_val = max_bytes[2];
+  52:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[3] > max_val) max_val = max_bytes[3];
+  53:simpleserial-bfmax-32bit-dsp.c **** 
+  54:simpleserial-bfmax-32bit-dsp.c ****    
+  55:simpleserial-bfmax-32bit-dsp.c ****     /* ---------------------------------------------------------------------
+  56:simpleserial-bfmax-32bit-dsp.c ****      * PASSO 2: Ricerca dell'indice vettorizzata (TIMING LEAK PRESERVATO)
+  57:simpleserial-bfmax-32bit-dsp.c ****      * --------------------------------------------------------------------- */
+  58:simpleserial-bfmax-32bit-dsp.c ****     uint32_t target_vec = (max_val << 24) | (max_val << 16) | (max_val << 8) | max_val;
+  59:simpleserial-bfmax-32bit-dsp.c **** 
+  60:simpleserial-bfmax-32bit-dsp.c ****     trigger_high();
+  61:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+  62:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+  63:simpleserial-bfmax-32bit-dsp.c ****         
+  64:simpleserial-bfmax-32bit-dsp.c ****         /* CONFRONTO IN 1 CICLO DI CLOCK: 
+  65:simpleserial-bfmax-32bit-dsp.c ****          * L'istruzione __USUB8 (Unsigned Subtract 8-bit) calcola val - target_vec.
+  66:simpleserial-bfmax-32bit-dsp.c ****          * Poiché target_vec è il massimo, val non sarà mai > target_vec.
+  67:simpleserial-bfmax-32bit-dsp.c ****          * Il flag GE andrà a 1 SE E SOLO SE val == target_vec. */
+  68:simpleserial-bfmax-32bit-dsp.c ****         __USUB8(val, target_vec);
+  69:simpleserial-bfmax-32bit-dsp.c ****         
+  70:simpleserial-bfmax-32bit-dsp.c ****         /* 1 CICLO DI CLOCK PER MATERIALIZZARE I FLAG:
+  71:simpleserial-bfmax-32bit-dsp.c ****          * Seleziona 0xFF per ogni byte dove GE=1 (match) e 0x00 dove GE=0. */
+  72:simpleserial-bfmax-32bit-dsp.c ****         uint32_t match = __SEL(0xFFFFFFFF, 0x00000000);
+  73:simpleserial-bfmax-32bit-dsp.c ****         
+  74:simpleserial-bfmax-32bit-dsp.c ****         if (match != 0) {
+  75:simpleserial-bfmax-32bit-dsp.c ****             trigger_low();
+  76:simpleserial-bfmax-32bit-dsp.c ****             /* Trovato il blocco! Identificazione dell'indice esatto.
+  77:simpleserial-bfmax-32bit-dsp.c ****              * EARLY EXIT: L'uscita prematura crea un timing leak lineare. */
+  78:simpleserial-bfmax-32bit-dsp.c ****             uint8_t *match_bytes = (uint8_t *)&match;
+  79:simpleserial-bfmax-32bit-dsp.c ****             if (match_bytes[0]){
+  80:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+  81:simpleserial-bfmax-32bit-dsp.c ****                 return (POS_T)(i * 4 + 0);
+  82:simpleserial-bfmax-32bit-dsp.c ****             }
+  83:simpleserial-bfmax-32bit-dsp.c ****             if (match_bytes[1])
+  84:simpleserial-bfmax-32bit-dsp.c ****             {
+  85:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+  86:simpleserial-bfmax-32bit-dsp.c ****                 return (POS_T)(i * 4 + 1);
+  87:simpleserial-bfmax-32bit-dsp.c ****             }
+  88:simpleserial-bfmax-32bit-dsp.c ****             if (match_bytes[2]) {
+  89:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+  90:simpleserial-bfmax-32bit-dsp.c ****                 return (POS_T)(i * 4 + 2);
+  91:simpleserial-bfmax-32bit-dsp.c ****             }
+  92:simpleserial-bfmax-32bit-dsp.c ****             
+  93:simpleserial-bfmax-32bit-dsp.c ****             //trigger_low();
+  94:simpleserial-bfmax-32bit-dsp.c ****             return (POS_T)(i * 4 + 3);
+  95:simpleserial-bfmax-32bit-dsp.c ****         }
+  96:simpleserial-bfmax-32bit-dsp.c ****     }
+  97:simpleserial-bfmax-32bit-dsp.c **** 
+  98:simpleserial-bfmax-32bit-dsp.c ****     return 0;
+  99:simpleserial-bfmax-32bit-dsp.c **** }
+ 100:simpleserial-bfmax-32bit-dsp.c **** 
+ 101:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+ 102:simpleserial-bfmax-32bit-dsp.c ****  * FUNZIONE VULNERABILE 2: update_sparse_vulnerable
+ 103:simpleserial-bfmax-32bit-dsp.c ****  * Contiene l'indirizzamento di memoria dipendente dal segreto Htr_sparse.
+ 104:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+ 105:simpleserial-bfmax-32bit-dsp.c **** void __attribute__((noinline)) update_sparse_vulnerable(POS_T col) {
+ 106:simpleserial-bfmax-32bit-dsp.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 107:simpleserial-bfmax-32bit-dsp.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 108:simpleserial-bfmax-32bit-dsp.c **** 
+ 109:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t k = 0; k < D_WEIGHT; k++) {
+ 110:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 111:simpleserial-bfmax-32bit-dsp.c ****         if (row >= R_BITS) {
+ 112:simpleserial-bfmax-32bit-dsp.c ****             row -= R_BITS;
+ 113:simpleserial-bfmax-32bit-dsp.c ****         }
+ 114:simpleserial-bfmax-32bit-dsp.c **** 
+ 115:simpleserial-bfmax-32bit-dsp.c ****         syndrome_bits[row] ^= 1;
+ 116:simpleserial-bfmax-32bit-dsp.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 117:simpleserial-bfmax-32bit-dsp.c **** 
+ 118:simpleserial-bfmax-32bit-dsp.c ****         /* VULNERABILITA' ADDRESS POWER LEAK:
+ 119:simpleserial-bfmax-32bit-dsp.c ****          * L'indirizzo upc[row] toccato in memoria dipende da Htr_sparse. */
+ 120:simpleserial-bfmax-32bit-dsp.c ****         upc[row] = (uint8_t)(upc[row] + delta);
+ 121:simpleserial-bfmax-32bit-dsp.c ****     }
+ 122:simpleserial-bfmax-32bit-dsp.c **** }
+ 123:simpleserial-bfmax-32bit-dsp.c **** 
+ 124:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+ 125:simpleserial-bfmax-32bit-dsp.c ****  * COMANDO SIMPLESERIAL 'p': Profiling diretto del Timing Leak di argmax_u8
+ 126:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+ 127:simpleserial-bfmax-32bit-dsp.c **** uint8_t cmd_profile_argmax(uint8_t* pt, uint8_t len) {
+ 128:simpleserial-bfmax-32bit-dsp.c ****     if (len < 2) return 0x01;
+ 129:simpleserial-bfmax-32bit-dsp.c **** 
+ 130:simpleserial-bfmax-32bit-dsp.c ****     POS_T target_pos = ((uint16_t)pt[0] << 8) | pt[1];
+ 131:simpleserial-bfmax-32bit-dsp.c ****     if (target_pos >= N_BITS) {
+ 132:simpleserial-bfmax-32bit-dsp.c ****         target_pos = N_BITS - 1;
+ 133:simpleserial-bfmax-32bit-dsp.c ****     }
+ 134:simpleserial-bfmax-32bit-dsp.c **** 
+ 135:simpleserial-bfmax-32bit-dsp.c ****     /* Rumore di fondo e posizionamento controllato del massimo */
+ 136:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 137:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 138:simpleserial-bfmax-32bit-dsp.c ****     }
+ 139:simpleserial-bfmax-32bit-dsp.c ****     upc[target_pos] = 15;
+ 140:simpleserial-bfmax-32bit-dsp.c **** 
+ 141:simpleserial-bfmax-32bit-dsp.c ****     /* --- INIZIO FINESTRA DI MISURA --- */
+ 142:simpleserial-bfmax-32bit-dsp.c ****     //trigger_high();
+ 143:simpleserial-bfmax-32bit-dsp.c ****     volatile POS_T found_col = argmax_u8_vulnerable(upc, N_BITS);
+ 144:simpleserial-bfmax-32bit-dsp.c ****     //trigger_low();
+ 145:simpleserial-bfmax-32bit-dsp.c ****     /* --- FINE FINESTRA DI MISURA --- */
+ 146:simpleserial-bfmax-32bit-dsp.c **** 
+ 147:simpleserial-bfmax-32bit-dsp.c ****     uint8_t resp[2];
+ 148:simpleserial-bfmax-32bit-dsp.c ****     resp[0] = (uint8_t)(found_col >> 8);
+ 149:simpleserial-bfmax-32bit-dsp.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 150:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_put('r', 2, resp);
+ 151:simpleserial-bfmax-32bit-dsp.c **** 
+ 152:simpleserial-bfmax-32bit-dsp.c ****     return 0x00;
+ 153:simpleserial-bfmax-32bit-dsp.c **** }
+ 154:simpleserial-bfmax-32bit-dsp.c **** 
+ 155:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+ 156:simpleserial-bfmax-32bit-dsp.c ****  * COMANDO SIMPLESERIAL 'k': Imposta chiave segreta Htr_sparse
+ 157:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+ 158:simpleserial-bfmax-32bit-dsp.c **** uint8_t cmd_set_key(uint8_t* k, uint8_t len) {
+  29              		.loc 1 158 46 view -0
+  30              		.cfi_startproc
+  31              		@ args = 0, pretend = 0, frame = 0
+  32              		@ frame_needed = 0, uses_anonymous_args = 0
+  33              		@ link register save eliminated.
+ 159:simpleserial-bfmax-32bit-dsp.c ****     uint8_t seed = (len > 0) ? k[0] : 0x42;
+  34              		.loc 1 159 5 view .LVU1
+  35              		.loc 1 159 13 is_stmt 0 view .LVU2
+  36 0000 D1B1     		cbz	r1, .L5
+  37              	.LBB15:
+  38              	.LBB16:
+ 160:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 161:simpleserial-bfmax-32bit-dsp.c ****         for (uint8_t j = 0; j < D_WEIGHT; j++) {
+ 162:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  39              		.loc 1 162 50 view .LVU3
+  40 0002 0378     		ldrb	r3, [r0]	@ zero_extendqisi2
+  41              	.L2:
+  42              	.LBE16:
+  43              	.LBE15:
+ 160:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t b = 0; b < N0; b++) {
+  44              		.loc 1 160 5 is_stmt 1 view .LVU4
+  45              	.LBB18:
+ 160:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t b = 0; b < N0; b++) {
+  46              		.loc 1 160 10 view .LVU5
+  47              	.LVL1:
+ 160:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t b = 0; b < N0; b++) {
+  48              		.loc 1 160 27 discriminator 1 view .LVU6
+  49              	.LBB17:
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  50              		.loc 1 161 31 discriminator 1 view .LVU7
+  51 0004 0D4A     		ldr	r2, .L9
+  52 0006 1946     		mov	r1, r3
+  53              	.LVL2:
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  54              		.loc 1 161 31 is_stmt 0 discriminator 1 view .LVU8
+  55 0008 02F11E0C 		add	ip, r2, #30
+  56              	.LVL3:
+  57              	.L3:
+  58              		.loc 1 162 13 is_stmt 1 view .LVU9
+  59              		.loc 1 162 32 is_stmt 0 view .LVU10
+  60 000c C1F30800 		ubfx	r0, r1, #0, #9
+  61 0010 22F8020F 		strh	r0, [r2, #2]!	@ movhi
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  62              		.loc 1 161 44 is_stmt 1 discriminator 3 view .LVU11
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  63              		.loc 1 161 31 discriminator 1 view .LVU12
+  64 0014 6245     		cmp	r2, ip
+  65 0016 01F11F01 		add	r1, r1, #31
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  66              		.loc 1 161 31 is_stmt 0 discriminator 1 view .LVU13
+  67 001a F7D1     		bne	.L3
+  68 001c 084A     		ldr	r2, .L9+4
+  69 001e 1133     		adds	r3, r3, #17
+  70 0020 02F11E00 		add	r0, r2, #30
+  71              	.LVL4:
+  72              	.L4:
+  73              		.loc 1 162 13 is_stmt 1 view .LVU14
+  74              		.loc 1 162 32 is_stmt 0 view .LVU15
+  75 0024 C3F30801 		ubfx	r1, r3, #0, #9
+  76 0028 22F8021F 		strh	r1, [r2, #2]!	@ movhi
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  77              		.loc 1 161 44 is_stmt 1 discriminator 3 view .LVU16
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  78              		.loc 1 161 31 discriminator 1 view .LVU17
+  79 002c 9042     		cmp	r0, r2
+  80 002e 03F11F03 		add	r3, r3, #31
+ 161:simpleserial-bfmax-32bit-dsp.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  81              		.loc 1 161 31 is_stmt 0 discriminator 1 view .LVU18
+  82 0032 F7D1     		bne	.L4
+  83              	.LBE17:
+ 160:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t b = 0; b < N0; b++) {
+  84              		.loc 1 160 34 is_stmt 1 discriminator 2 view .LVU19
+  85              	.LVL5:
+ 160:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t b = 0; b < N0; b++) {
+  86              		.loc 1 160 27 discriminator 1 view .LVU20
+  87              	.LBE18:
+ 163:simpleserial-bfmax-32bit-dsp.c ****         }
+ 164:simpleserial-bfmax-32bit-dsp.c ****     }
+ 165:simpleserial-bfmax-32bit-dsp.c ****     return 0x00;
+  88              		.loc 1 165 5 view .LVU21
+ 166:simpleserial-bfmax-32bit-dsp.c **** }
+  89              		.loc 1 166 1 is_stmt 0 view .LVU22
+  90 0034 0020     		movs	r0, #0
+  91 0036 7047     		bx	lr
+  92              	.LVL6:
+  93              	.L5:
+  94              		.loc 1 166 1 view .LVU23
+  95 0038 4223     		movs	r3, #66
+  96 003a E3E7     		b	.L2
+  97              	.L10:
+  98              		.align	2
+  99              	.L9:
+ 100 003c FEFFFFFF 		.word	.LANCHOR0-2
+ 101 0040 1C000000 		.word	.LANCHOR0+28
+ 102              		.cfi_endproc
+ 103              	.LFE126:
+ 105              		.section	.text.argmax_u8_vulnerable,"ax",%progbits
+ 106              		.align	1
+ 107              		.p2align 2,,3
+ 108              		.global	argmax_u8_vulnerable
+ 109              		.syntax unified
+ 110              		.thumb
+ 111              		.thumb_func
+ 113              	argmax_u8_vulnerable:
+ 114              	.LVL7:
+ 115              	.LFB123:
+  29:simpleserial-bfmax-32bit-dsp.c ****     uint32_t max_vec = 0;
+ 116              		.loc 1 29 88 is_stmt 1 view -0
+ 117              		.cfi_startproc
+ 118              		@ args = 0, pretend = 0, frame = 0
+ 119              		@ frame_needed = 0, uses_anonymous_args = 0
+  30:simpleserial-bfmax-32bit-dsp.c ****     const uint32_t *arr32 = (const uint32_t *)arr;
+ 120              		.loc 1 30 5 view .LVU25
+  31:simpleserial-bfmax-32bit-dsp.c ****     uint16_t len32 = len / 4; 
+ 121              		.loc 1 31 5 view .LVU26
+  32:simpleserial-bfmax-32bit-dsp.c ****     
+ 122              		.loc 1 32 5 view .LVU27
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 123              		.loc 1 37 5 view .LVU28
+ 124              	.LBB19:
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 125              		.loc 1 37 10 view .LVU29
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 126              		.loc 1 37 28 discriminator 1 view .LVU30
+ 127              	.LBE19:
+  29:simpleserial-bfmax-32bit-dsp.c ****     uint32_t max_vec = 0;
+ 128              		.loc 1 29 88 is_stmt 0 view .LVU31
+ 129 0000 F8B5     		push	{r3, r4, r5, r6, r7, lr}
+ 130              	.LCFI0:
+ 131              		.cfi_def_cfa_offset 24
+ 132              		.cfi_offset 3, -24
+ 133              		.cfi_offset 4, -20
+ 134              		.cfi_offset 5, -16
+ 135              		.cfi_offset 6, -12
+ 136              		.cfi_offset 7, -8
+ 137              		.cfi_offset 14, -4
+ 138              	.LBB25:
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 139              		.loc 1 37 28 discriminator 1 view .LVU32
+ 140 0002 8F08     		lsrs	r7, r1, #2
+ 141 0004 42D0     		beq	.L23
+ 142 0006 0546     		mov	r5, r0
+ 143 0008 0246     		mov	r2, r0
+ 144 000a 00EB8701 		add	r1, r0, r7, lsl #2
+ 145              	.LVL8:
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 146              		.loc 1 37 28 discriminator 1 view .LVU33
+ 147              	.LBE25:
+  30:simpleserial-bfmax-32bit-dsp.c ****     const uint32_t *arr32 = (const uint32_t *)arr;
+ 148              		.loc 1 30 14 view .LVU34
+ 149 000e 0023     		movs	r3, #0
+ 150              	.LVL9:
+ 151              	.L14:
+ 152              	.LBB26:
+ 153              	.LBB20:
+  38:simpleserial-bfmax-32bit-dsp.c ****         
+ 154              		.loc 1 38 9 is_stmt 1 view .LVU35
+  38:simpleserial-bfmax-32bit-dsp.c ****         
+ 155              		.loc 1 38 18 is_stmt 0 view .LVU36
+ 156 0010 52F8044B 		ldr	r4, [r2], #4
+ 157              	.LVL10:
+  41:simpleserial-bfmax-32bit-dsp.c ****         
+ 158              		.loc 1 41 9 is_stmt 1 view .LVU37
+ 159              	.LBB21:
+ 160              	.LBI21:
+ 161              		.file 2 ".././hal//stm32f3/CMSIS/core/cmsis_gcc.h"
+   1:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**************************************************************************//**
+   2:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  * @file     cmsis_gcc.h
+   3:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  * @brief    CMSIS Cortex-M Core Function/Instruction Header File
+   4:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  * @version  V4.30
+   5:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  * @date     20. October 2015
+   6:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  ******************************************************************************/
+   7:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /* Copyright (c) 2009 - 2015 ARM LIMITED
+   8:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+   9:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    All rights reserved.
+  10:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    Redistribution and use in source and binary forms, with or without
+  11:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    modification, are permitted provided that the following conditions are met:
+  12:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    - Redistributions of source code must retain the above copyright
+  13:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****      notice, this list of conditions and the following disclaimer.
+  14:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    - Redistributions in binary form must reproduce the above copyright
+  15:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****      notice, this list of conditions and the following disclaimer in the
+  16:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****      documentation and/or other materials provided with the distribution.
+  17:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    - Neither the name of ARM nor the names of its contributors may be used
+  18:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****      to endorse or promote products derived from this software without
+  19:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****      specific prior written permission.
+  20:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    *
+  21:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  22:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  23:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  24:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    ARE DISCLAIMED. IN NO EVENT SHALL COPYRIGHT HOLDERS AND CONTRIBUTORS BE
+  25:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  26:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  27:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  28:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  29:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  30:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  31:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    POSSIBILITY OF SUCH DAMAGE.
+  32:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    ---------------------------------------------------------------------------*/
+  33:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  34:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  35:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #ifndef __CMSIS_GCC_H
+  36:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __CMSIS_GCC_H
+  37:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  38:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /* ignore some GCC warnings */
+  39:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if defined ( __GNUC__ )
+  40:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #pragma GCC diagnostic push
+  41:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #pragma GCC diagnostic ignored "-Wsign-conversion"
+  42:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #pragma GCC diagnostic ignored "-Wconversion"
+  43:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #pragma GCC diagnostic ignored "-Wunused-parameter"
+  44:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+  45:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  46:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  47:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /* ###########################  Core Function Access  ########################### */
+  48:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /** \ingroup  CMSIS_Core_FunctionInterface
+  49:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     \defgroup CMSIS_Core_RegAccFunctions CMSIS Core Register Access Functions
+  50:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   @{
+  51:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+  52:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  53:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+  54:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Enable IRQ Interrupts
+  55:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Enables IRQ interrupts by clearing the I-bit in the CPSR.
+  56:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            Can only be executed in Privileged modes.
+  57:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+  58:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __enable_irq(void)
+  59:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+  60:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("cpsie i" : : : "memory");
+  61:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+  62:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  63:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  64:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+  65:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Disable IRQ Interrupts
+  66:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Disables IRQ interrupts by setting the I-bit in the CPSR.
+  67:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   Can only be executed in Privileged modes.
+  68:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+  69:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __disable_irq(void)
+  70:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+  71:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("cpsid i" : : : "memory");
+  72:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+  73:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  74:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  75:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+  76:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get Control Register
+  77:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the content of the Control Register.
+  78:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Control Register value
+  79:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+  80:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_CONTROL(void)
+  81:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+  82:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+  83:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  84:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, control" : "=r" (result) );
+  85:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+  86:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+  87:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  88:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  89:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+  90:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Control Register
+  91:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Writes the given value to the Control Register.
+  92:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    control  Control Register value to set
+  93:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+  94:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_CONTROL(uint32_t control)
+  95:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+  96:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR control, %0" : : "r" (control) : "memory");
+  97:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+  98:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+  99:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 100:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 101:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get IPSR Register
+ 102:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the content of the IPSR Register.
+ 103:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               IPSR Register value
+ 104:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 105:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_IPSR(void)
+ 106:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 107:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 108:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 109:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, ipsr" : "=r" (result) );
+ 110:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 111:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 112:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 113:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 114:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 115:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get APSR Register
+ 116:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the content of the APSR Register.
+ 117:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               APSR Register value
+ 118:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 119:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_APSR(void)
+ 120:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 121:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 122:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 123:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, apsr" : "=r" (result) );
+ 124:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 125:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 126:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 127:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 128:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 129:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get xPSR Register
+ 130:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the content of the xPSR Register.
+ 131:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 132:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     \return               xPSR Register value
+ 133:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 134:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_xPSR(void)
+ 135:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 136:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 137:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 138:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, xpsr" : "=r" (result) );
+ 139:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 140:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 141:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 142:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 143:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 144:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get Process Stack Pointer
+ 145:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the current value of the Process Stack Pointer (PSP).
+ 146:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               PSP Register value
+ 147:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 148:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_PSP(void)
+ 149:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 150:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   register uint32_t result;
+ 151:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 152:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, psp\n"  : "=r" (result) );
+ 153:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 154:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 155:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 156:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 157:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 158:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Process Stack Pointer
+ 159:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Process Stack Pointer (PSP).
+ 160:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    topOfProcStack  Process Stack Pointer value to set
+ 161:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 162:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_PSP(uint32_t topOfProcStack)
+ 163:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 164:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR psp, %0\n" : : "r" (topOfProcStack) : "sp");
+ 165:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 166:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 167:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 168:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 169:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get Main Stack Pointer
+ 170:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the current value of the Main Stack Pointer (MSP).
+ 171:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               MSP Register value
+ 172:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 173:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_MSP(void)
+ 174:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 175:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   register uint32_t result;
+ 176:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 177:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, msp\n" : "=r" (result) );
+ 178:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 179:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 180:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 181:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 182:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 183:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Main Stack Pointer
+ 184:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Main Stack Pointer (MSP).
+ 185:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 186:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     \param [in]    topOfMainStack  Main Stack Pointer value to set
+ 187:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 188:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_MSP(uint32_t topOfMainStack)
+ 189:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 190:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR msp, %0\n" : : "r" (topOfMainStack) : "sp");
+ 191:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 192:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 193:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 194:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 195:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get Priority Mask
+ 196:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the current state of the priority mask bit from the Priority Mask Register.
+ 197:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Priority Mask value
+ 198:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 199:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_PRIMASK(void)
+ 200:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 201:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 202:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 203:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, primask" : "=r" (result) );
+ 204:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 205:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 206:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 207:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 208:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 209:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Priority Mask
+ 210:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Priority Mask Register.
+ 211:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    priMask  Priority Mask
+ 212:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 213:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_PRIMASK(uint32_t priMask)
+ 214:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 215:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR primask, %0" : : "r" (priMask) : "memory");
+ 216:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 217:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 218:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 219:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if       (__CORTEX_M >= 0x03U)
+ 220:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 221:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 222:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Enable FIQ
+ 223:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Enables FIQ interrupts by clearing the F-bit in the CPSR.
+ 224:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            Can only be executed in Privileged modes.
+ 225:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 226:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __enable_fault_irq(void)
+ 227:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 228:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("cpsie f" : : : "memory");
+ 229:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 230:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 231:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 232:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 233:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Disable FIQ
+ 234:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Disables FIQ interrupts by setting the F-bit in the CPSR.
+ 235:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            Can only be executed in Privileged modes.
+ 236:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 237:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __disable_fault_irq(void)
+ 238:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 239:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("cpsid f" : : : "memory");
+ 240:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 241:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 242:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 243:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 244:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get Base Priority
+ 245:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the current value of the Base Priority register.
+ 246:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Base Priority register value
+ 247:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 248:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_BASEPRI(void)
+ 249:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 250:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 251:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 252:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, basepri" : "=r" (result) );
+ 253:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 254:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 255:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 256:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 257:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 258:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Base Priority
+ 259:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Base Priority register.
+ 260:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    basePri  Base Priority value to set
+ 261:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 262:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_BASEPRI(uint32_t value)
+ 263:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 264:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR basepri, %0" : : "r" (value) : "memory");
+ 265:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 266:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 267:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 268:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 269:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Base Priority with condition
+ 270:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Base Priority register only if BASEPRI masking is disable
+ 271:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            or the new value increases the BASEPRI priority level.
+ 272:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    basePri  Base Priority value to set
+ 273:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 274:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_BASEPRI_MAX(uint32_t value)
+ 275:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 276:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR basepri_max, %0" : : "r" (value) : "memory");
+ 277:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 278:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 279:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 280:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 281:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get Fault Mask
+ 282:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the current value of the Fault Mask register.
+ 283:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Fault Mask register value
+ 284:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 285:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_FAULTMASK(void)
+ 286:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 287:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 288:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 289:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MRS %0, faultmask" : "=r" (result) );
+ 290:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 291:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 292:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 293:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 294:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 295:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set Fault Mask
+ 296:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Fault Mask register.
+ 297:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    faultMask  Fault Mask value to set
+ 298:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 299:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_FAULTMASK(uint32_t faultMask)
+ 300:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 301:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("MSR faultmask, %0" : : "r" (faultMask) : "memory");
+ 302:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 303:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 304:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif /* (__CORTEX_M >= 0x03U) */
+ 305:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 306:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 307:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if       (__CORTEX_M == 0x04U) || (__CORTEX_M == 0x07U)
+ 308:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 309:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 310:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Get FPSCR
+ 311:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Returns the current value of the Floating Point Status/Control register.
+ 312:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Floating Point Status/Control register value
+ 313:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 314:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __get_FPSCR(void)
+ 315:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 316:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__FPU_PRESENT == 1U) && (__FPU_USED == 1U)
+ 317:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 318:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 319:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   /* Empty asm statement works as a scheduling barrier */
+ 320:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("");
+ 321:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("VMRS %0, fpscr" : "=r" (result) );
+ 322:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("");
+ 323:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 324:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 325:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return(0);
+ 326:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 327:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 328:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 329:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 330:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 331:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Set FPSCR
+ 332:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Assigns the given value to the Floating Point Status/Control register.
+ 333:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    fpscr  Floating Point Status/Control value to set
+ 334:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 335:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE void __set_FPSCR(uint32_t fpscr)
+ 336:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 337:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__FPU_PRESENT == 1U) && (__FPU_USED == 1U)
+ 338:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   /* Empty asm statement works as a scheduling barrier */
+ 339:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("");
+ 340:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("VMSR fpscr, %0" : : "r" (fpscr) : "vfpcc");
+ 341:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("");
+ 342:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 343:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 344:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 345:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif /* (__CORTEX_M == 0x04U) || (__CORTEX_M == 0x07U) */
+ 346:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 347:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 348:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 349:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /*@} end of CMSIS_Core_RegAccFunctions */
+ 350:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 351:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 352:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /* ##########################  Core Instruction Access  ######################### */
+ 353:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /** \defgroup CMSIS_Core_InstructionInterface CMSIS Core Instruction Interface
+ 354:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   Access to dedicated instructions
+ 355:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   @{
+ 356:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** */
+ 357:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 358:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /* Define macros for porting to both thumb1 and thumb2.
+ 359:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  * For thumb1, use low register (r0-r7), specified by constraint "l"
+ 360:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  * Otherwise, use general registers, specified by constraint "r" */
+ 361:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if defined (__thumb__) && !defined (__thumb2__)
+ 362:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __CMSIS_GCC_OUT_REG(r) "=l" (r)
+ 363:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __CMSIS_GCC_USE_REG(r) "l" (r)
+ 364:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 365:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __CMSIS_GCC_OUT_REG(r) "=r" (r)
+ 366:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __CMSIS_GCC_USE_REG(r) "r" (r)
+ 367:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 368:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 369:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 370:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   No Operation
+ 371:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details No Operation does nothing. This instruction can be used for code alignment purposes.
+ 372:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 373:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __NOP(void)
+ 374:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 375:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("nop");
+ 376:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 377:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 378:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 379:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 380:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Wait For Interrupt
+ 381:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Wait For Interrupt is a hint instruction that suspends execution until one of a number o
+ 382:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 383:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __WFI(void)
+ 384:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 385:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("wfi");
+ 386:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 387:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 388:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 389:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 390:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Wait For Event
+ 391:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Wait For Event is a hint instruction that permits the processor to enter
+ 392:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     a low-power state until one of a number of events occurs.
+ 393:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 394:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __WFE(void)
+ 395:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 396:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("wfe");
+ 397:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 398:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 399:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 400:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 401:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Send Event
+ 402:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Send Event is a hint instruction. It causes an event to be signaled to the CPU.
+ 403:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 404:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __SEV(void)
+ 405:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 406:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sev");
+ 407:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 408:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 409:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 410:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 411:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Instruction Synchronization Barrier
+ 412:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Instruction Synchronization Barrier flushes the pipeline in the processor,
+ 413:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            so that all instructions following the ISB are fetched from cache or memory,
+ 414:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            after the instruction has been completed.
+ 415:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 416:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __ISB(void)
+ 417:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 418:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("isb 0xF":::"memory");
+ 419:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 420:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 421:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 422:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 423:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Data Synchronization Barrier
+ 424:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Acts as a special kind of Data Memory Barrier.
+ 425:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            It completes when all explicit memory accesses before this instruction complete.
+ 426:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 427:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __DSB(void)
+ 428:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 429:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("dsb 0xF":::"memory");
+ 430:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 431:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 432:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 433:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 434:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Data Memory Barrier
+ 435:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Ensures the apparent order of the explicit memory operations before
+ 436:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            and after the instruction, without ensuring their completion.
+ 437:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 438:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __DMB(void)
+ 439:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 440:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("dmb 0xF":::"memory");
+ 441:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 442:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 443:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 444:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 445:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Reverse byte order (32 bit)
+ 446:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Reverses the byte order in integer value.
+ 447:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Value to reverse
+ 448:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Reversed value
+ 449:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 450:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __REV(uint32_t value)
+ 451:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 452:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 5)
+ 453:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return __builtin_bswap32(value);
+ 454:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 455:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 456:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 457:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("rev %0, %1" : __CMSIS_GCC_OUT_REG (result) : __CMSIS_GCC_USE_REG (value) );
+ 458:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 459:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 460:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 461:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 462:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 463:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 464:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Reverse byte order (16 bit)
+ 465:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Reverses the byte order in two unsigned short values.
+ 466:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Value to reverse
+ 467:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Reversed value
+ 468:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 469:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __REV16(uint32_t value)
+ 470:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 471:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 472:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 473:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("rev16 %0, %1" : __CMSIS_GCC_OUT_REG (result) : __CMSIS_GCC_USE_REG (value) );
+ 474:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 475:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 476:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 477:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 478:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 479:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Reverse byte order in signed short value
+ 480:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Reverses the byte order in a signed short value with sign extension to integer.
+ 481:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Value to reverse
+ 482:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Reversed value
+ 483:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 484:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE int32_t __REVSH(int32_t value)
+ 485:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 486:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)
+ 487:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return (short)__builtin_bswap16(value);
+ 488:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 489:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   int32_t result;
+ 490:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 491:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("revsh %0, %1" : __CMSIS_GCC_OUT_REG (result) : __CMSIS_GCC_USE_REG (value) );
+ 492:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 493:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 494:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 495:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 496:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 497:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 498:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Rotate Right in unsigned value (32 bit)
+ 499:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Rotate Right (immediate) provides the value of the contents of a register rotated by a v
+ 500:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Value to rotate
+ 501:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Number of Bits to rotate
+ 502:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Rotated value
+ 503:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 504:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __ROR(uint32_t op1, uint32_t op2)
+ 505:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 506:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return (op1 >> op2) | (op1 << (32U - op2));
+ 507:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 508:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 509:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 510:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 511:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Breakpoint
+ 512:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Causes the processor to enter Debug state.
+ 513:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            Debug tools can use this to investigate system state when the instruction at a particula
+ 514:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  is ignored by the processor.
+ 515:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****                  If required, a debugger can use it to store additional information about the break
+ 516:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 517:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __BKPT(value)                       __ASM volatile ("bkpt "#value)
+ 518:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 519:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 520:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 521:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Reverse bit order of value
+ 522:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Reverses the bit order of the given value.
+ 523:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Value to reverse
+ 524:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Reversed value
+ 525:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 526:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __RBIT(uint32_t value)
+ 527:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 528:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 529:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 530:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if       (__CORTEX_M >= 0x03U) || (__CORTEX_SC >= 300U)
+ 531:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("rbit %0, %1" : "=r" (result) : "r" (value) );
+ 532:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 533:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   int32_t s = 4 /*sizeof(v)*/ * 8 - 1; /* extra shift needed at end */
+ 534:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 535:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   result = value;                      /* r will be reversed bits of v; first get LSB of v */
+ 536:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   for (value >>= 1U; value; value >>= 1U)
+ 537:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   {
+ 538:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     result <<= 1U;
+ 539:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     result |= value & 1U;
+ 540:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     s--;
+ 541:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   }
+ 542:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   result <<= s;                        /* shift when v's highest bits are zero */
+ 543:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 544:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 545:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 546:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 547:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 548:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 549:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Count leading zeros
+ 550:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Counts the number of leading zeros of a data value.
+ 551:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to count the leading zeros
+ 552:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return             number of leading zeros in value
+ 553:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 554:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __CLZ             __builtin_clz
+ 555:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 556:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 557:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if       (__CORTEX_M >= 0x03U) || (__CORTEX_SC >= 300U)
+ 558:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 559:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 560:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   LDR Exclusive (8 bit)
+ 561:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a exclusive LDR instruction for 8 bit value.
+ 562:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to data
+ 563:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return             value of type uint8_t at (*ptr)
+ 564:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 565:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint8_t __LDREXB(volatile uint8_t *addr)
+ 566:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 567:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t result;
+ 568:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 569:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)
+ 570:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrexb %0, %1" : "=r" (result) : "Q" (*addr) );
+ 571:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 572:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     /* Prior to GCC 4.8, "Q" will be expanded to [rx, #0] which is not
+ 573:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****        accepted by assembler. So has to use following less efficient pattern.
+ 574:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     */
+ 575:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrexb %0, [%1]" : "=r" (result) : "r" (addr) : "memory" );
+ 576:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 577:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return ((uint8_t) result);    /* Add explicit type cast here */
+ 578:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 579:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 580:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 581:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 582:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   LDR Exclusive (16 bit)
+ 583:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a exclusive LDR instruction for 16 bit values.
+ 584:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to data
+ 585:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return        value of type uint16_t at (*ptr)
+ 586:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 587:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint16_t __LDREXH(volatile uint16_t *addr)
+ 588:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 589:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t result;
+ 590:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 591:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)
+ 592:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrexh %0, %1" : "=r" (result) : "Q" (*addr) );
+ 593:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 594:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     /* Prior to GCC 4.8, "Q" will be expanded to [rx, #0] which is not
+ 595:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****        accepted by assembler. So has to use following less efficient pattern.
+ 596:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     */
+ 597:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrexh %0, [%1]" : "=r" (result) : "r" (addr) : "memory" );
+ 598:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 599:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return ((uint16_t) result);    /* Add explicit type cast here */
+ 600:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 601:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 602:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 603:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 604:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   LDR Exclusive (32 bit)
+ 605:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a exclusive LDR instruction for 32 bit values.
+ 606:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to data
+ 607:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return        value of type uint32_t at (*ptr)
+ 608:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 609:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __LDREXW(volatile uint32_t *addr)
+ 610:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 611:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t result;
+ 612:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 613:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrex %0, %1" : "=r" (result) : "Q" (*addr) );
+ 614:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return(result);
+ 615:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 616:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 617:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 618:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 619:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   STR Exclusive (8 bit)
+ 620:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a exclusive STR instruction for 8 bit values.
+ 621:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to store
+ 622:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to location
+ 623:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return          0  Function succeeded
+ 624:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return          1  Function failed
+ 625:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 626:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __STREXB(uint8_t value, volatile uint8_t *a
+ 627:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 628:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    uint32_t result;
+ 629:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 630:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("strexb %0, %2, %1" : "=&r" (result), "=Q" (*addr) : "r" ((uint32_t)value) );
+ 631:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return(result);
+ 632:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 633:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 634:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 635:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 636:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   STR Exclusive (16 bit)
+ 637:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a exclusive STR instruction for 16 bit values.
+ 638:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to store
+ 639:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to location
+ 640:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return          0  Function succeeded
+ 641:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return          1  Function failed
+ 642:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 643:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __STREXH(uint16_t value, volatile uint16_t 
+ 644:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 645:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    uint32_t result;
+ 646:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 647:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("strexh %0, %2, %1" : "=&r" (result), "=Q" (*addr) : "r" ((uint32_t)value) );
+ 648:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return(result);
+ 649:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 650:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 651:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 652:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 653:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   STR Exclusive (32 bit)
+ 654:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a exclusive STR instruction for 32 bit values.
+ 655:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to store
+ 656:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to location
+ 657:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return          0  Function succeeded
+ 658:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return          1  Function failed
+ 659:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 660:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __STREXW(uint32_t value, volatile uint32_t 
+ 661:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 662:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    uint32_t result;
+ 663:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 664:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("strex %0, %2, %1" : "=&r" (result), "=Q" (*addr) : "r" (value) );
+ 665:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return(result);
+ 666:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 667:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 668:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 669:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 670:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Remove the exclusive lock
+ 671:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Removes the exclusive lock which is created by LDREX.
+ 672:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 673:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __CLREX(void)
+ 674:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 675:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("clrex" ::: "memory");
+ 676:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 677:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 678:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 679:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 680:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Signed Saturate
+ 681:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Saturates a signed value.
+ 682:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to be saturated
+ 683:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    sat  Bit position to saturate to (1..32)
+ 684:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return             Saturated value
+ 685:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 686:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __SSAT(ARG1,ARG2) \
+ 687:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** ({                          \
+ 688:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t __RES, __ARG1 = (ARG1); \
+ 689:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM ("ssat %0, %1, %2" : "=r" (__RES) :  "I" (ARG2), "r" (__ARG1) ); \
+ 690:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __RES; \
+ 691:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  })
+ 692:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 693:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 694:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 695:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Unsigned Saturate
+ 696:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Saturates an unsigned value.
+ 697:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to be saturated
+ 698:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    sat  Bit position to saturate to (0..31)
+ 699:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return             Saturated value
+ 700:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 701:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __USAT(ARG1,ARG2) \
+ 702:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** ({                          \
+ 703:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t __RES, __ARG1 = (ARG1); \
+ 704:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM ("usat %0, %1, %2" : "=r" (__RES) :  "I" (ARG2), "r" (__ARG1) ); \
+ 705:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __RES; \
+ 706:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  })
+ 707:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 708:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 709:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 710:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   Rotate Right with Extend (32 bit)
+ 711:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Moves each bit of a bitstring right by one bit.
+ 712:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****            The carry input is shifted in at the left end of the bitstring.
+ 713:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    value  Value to rotate
+ 714:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return               Rotated value
+ 715:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 716:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __RRX(uint32_t value)
+ 717:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 718:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 719:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 720:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("rrx %0, %1" : __CMSIS_GCC_OUT_REG (result) : __CMSIS_GCC_USE_REG (value) );
+ 721:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 722:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 723:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 724:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 725:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 726:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   LDRT Unprivileged (8 bit)
+ 727:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a Unprivileged LDRT instruction for 8 bit value.
+ 728:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to data
+ 729:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return             value of type uint8_t at (*ptr)
+ 730:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 731:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint8_t __LDRBT(volatile uint8_t *addr)
+ 732:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 733:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t result;
+ 734:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 735:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)
+ 736:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrbt %0, %1" : "=r" (result) : "Q" (*addr) );
+ 737:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 738:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     /* Prior to GCC 4.8, "Q" will be expanded to [rx, #0] which is not
+ 739:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****        accepted by assembler. So has to use following less efficient pattern.
+ 740:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     */
+ 741:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrbt %0, [%1]" : "=r" (result) : "r" (addr) : "memory" );
+ 742:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 743:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return ((uint8_t) result);    /* Add explicit type cast here */
+ 744:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 745:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 746:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 747:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 748:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   LDRT Unprivileged (16 bit)
+ 749:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a Unprivileged LDRT instruction for 16 bit values.
+ 750:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to data
+ 751:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return        value of type uint16_t at (*ptr)
+ 752:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 753:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint16_t __LDRHT(volatile uint16_t *addr)
+ 754:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 755:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t result;
+ 756:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 757:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)
+ 758:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrht %0, %1" : "=r" (result) : "Q" (*addr) );
+ 759:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else
+ 760:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     /* Prior to GCC 4.8, "Q" will be expanded to [rx, #0] which is not
+ 761:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****        accepted by assembler. So has to use following less efficient pattern.
+ 762:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     */
+ 763:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrht %0, [%1]" : "=r" (result) : "r" (addr) : "memory" );
+ 764:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+ 765:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return ((uint16_t) result);    /* Add explicit type cast here */
+ 766:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 767:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 768:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 769:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 770:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   LDRT Unprivileged (32 bit)
+ 771:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a Unprivileged LDRT instruction for 32 bit values.
+ 772:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to data
+ 773:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \return        value of type uint32_t at (*ptr)
+ 774:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 775:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE uint32_t __LDRT(volatile uint32_t *addr)
+ 776:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 777:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t result;
+ 778:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 779:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("ldrt %0, %1" : "=r" (result) : "Q" (*addr) );
+ 780:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    return(result);
+ 781:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 782:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 783:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 784:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 785:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   STRT Unprivileged (8 bit)
+ 786:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a Unprivileged STRT instruction for 8 bit values.
+ 787:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to store
+ 788:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to location
+ 789:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 790:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __STRBT(uint8_t value, volatile uint8_t *addr)
+ 791:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 792:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("strbt %1, %0" : "=Q" (*addr) : "r" ((uint32_t)value) );
+ 793:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 794:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 795:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 796:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 797:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   STRT Unprivileged (16 bit)
+ 798:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a Unprivileged STRT instruction for 16 bit values.
+ 799:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to store
+ 800:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to location
+ 801:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 802:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __STRHT(uint16_t value, volatile uint16_t *addr
+ 803:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 804:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("strht %1, %0" : "=Q" (*addr) : "r" ((uint32_t)value) );
+ 805:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 806:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 807:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 808:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /**
+ 809:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \brief   STRT Unprivileged (32 bit)
+ 810:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \details Executes a Unprivileged STRT instruction for 32 bit values.
+ 811:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]  value  Value to store
+ 812:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   \param [in]    ptr  Pointer to location
+ 813:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  */
+ 814:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__((always_inline)) __STATIC_INLINE void __STRT(uint32_t value, volatile uint32_t *addr)
+ 815:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 816:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****    __ASM volatile ("strt %1, %0" : "=Q" (*addr) : "r" (value) );
+ 817:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 818:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 819:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif /* (__CORTEX_M >= 0x03U) || (__CORTEX_SC >= 300U) */
+ 820:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 821:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /*@}*/ /* end of group CMSIS_Core_InstructionInterface */
+ 822:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 823:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 824:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /* ###################  Compiler specific Intrinsics  ########################### */
+ 825:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** /** \defgroup CMSIS_SIMD_intrinsics CMSIS SIMD Intrinsics
+ 826:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   Access to dedicated SIMD instructions
+ 827:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   @{
+ 828:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** */
+ 829:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 830:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #if (__CORTEX_M >= 0x04U)  /* only for Cortex-M4 and above */
+ 831:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 832:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SADD8(uint32_t op1, uint32_t op2)
+ 833:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 834:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 835:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 836:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sadd8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 837:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 838:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 839:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 840:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __QADD8(uint32_t op1, uint32_t op2)
+ 841:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 842:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 843:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 844:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("qadd8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 845:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 846:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 847:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 848:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SHADD8(uint32_t op1, uint32_t op2)
+ 849:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 850:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 851:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 852:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("shadd8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 853:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 854:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 855:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 856:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UADD8(uint32_t op1, uint32_t op2)
+ 857:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 858:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 859:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 860:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uadd8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 861:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 862:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 863:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 864:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UQADD8(uint32_t op1, uint32_t op2)
+ 865:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 866:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 867:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 868:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uqadd8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 869:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 870:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 871:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 872:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UHADD8(uint32_t op1, uint32_t op2)
+ 873:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 874:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 875:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 876:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uhadd8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 877:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 878:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 879:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 880:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 881:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SSUB8(uint32_t op1, uint32_t op2)
+ 882:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 883:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 884:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 885:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("ssub8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 886:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 887:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 888:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 889:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __QSUB8(uint32_t op1, uint32_t op2)
+ 890:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 891:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 892:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 893:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("qsub8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 894:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 895:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 896:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 897:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SHSUB8(uint32_t op1, uint32_t op2)
+ 898:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 899:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 900:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 901:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("shsub8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 902:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 903:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 904:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 905:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __USUB8(uint32_t op1, uint32_t op2)
+ 162              		.loc 2 905 61 view .LVU38
+ 163              	.LBB22:
+ 906:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 907:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 164              		.loc 2 907 3 view .LVU39
+ 908:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 909:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("usub8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 165              		.loc 2 909 3 view .LVU40
+ 166              		.syntax unified
+ 167              	@ 909 ".././hal//stm32f3/CMSIS/core/cmsis_gcc.h" 1
+ 168 0014 C4FA43F0 		usub8 r0, r4, r3
+ 169              	@ 0 "" 2
+ 170              	.LVL11:
+ 910:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 171              		.loc 2 910 3 view .LVU41
+ 172              		.loc 2 910 3 is_stmt 0 view .LVU42
+ 173              		.thumb
+ 174              		.syntax unified
+ 175              	.LBE22:
+ 176              	.LBE21:
+  44:simpleserial-bfmax-32bit-dsp.c ****     }
+ 177              		.loc 1 44 9 is_stmt 1 view .LVU43
+ 178              	.LBB23:
+ 179              	.LBI23:
+ 911:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 912:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 913:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UQSUB8(uint32_t op1, uint32_t op2)
+ 914:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 915:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 916:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 917:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uqsub8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 918:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 919:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 920:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 921:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UHSUB8(uint32_t op1, uint32_t op2)
+ 922:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 923:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 924:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 925:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uhsub8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 926:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 927:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 928:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 929:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 930:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SADD16(uint32_t op1, uint32_t op2)
+ 931:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 932:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 933:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 934:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sadd16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 935:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 936:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 937:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 938:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __QADD16(uint32_t op1, uint32_t op2)
+ 939:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 940:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 941:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 942:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("qadd16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 943:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 944:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 945:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 946:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SHADD16(uint32_t op1, uint32_t op2)
+ 947:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 948:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 949:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 950:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("shadd16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 951:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 952:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 953:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 954:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UADD16(uint32_t op1, uint32_t op2)
+ 955:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 956:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 957:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 958:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uadd16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 959:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 960:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 961:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 962:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UQADD16(uint32_t op1, uint32_t op2)
+ 963:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 964:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 965:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 966:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uqadd16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 967:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 968:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 969:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 970:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UHADD16(uint32_t op1, uint32_t op2)
+ 971:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 972:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 973:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 974:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uhadd16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 975:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 976:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 977:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 978:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SSUB16(uint32_t op1, uint32_t op2)
+ 979:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 980:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 981:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 982:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("ssub16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 983:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 984:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 985:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 986:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __QSUB16(uint32_t op1, uint32_t op2)
+ 987:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 988:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 989:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 990:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("qsub16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 991:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 992:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 993:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 994:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SHSUB16(uint32_t op1, uint32_t op2)
+ 995:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 996:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 997:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 998:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("shsub16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 999:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1000:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1001:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1002:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __USUB16(uint32_t op1, uint32_t op2)
+1003:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1004:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1005:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1006:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("usub16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1007:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1008:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1009:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1010:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UQSUB16(uint32_t op1, uint32_t op2)
+1011:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1012:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1013:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1014:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uqsub16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1015:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1016:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1017:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1018:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UHSUB16(uint32_t op1, uint32_t op2)
+1019:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1020:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1021:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1022:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uhsub16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1023:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1024:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1025:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1026:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SASX(uint32_t op1, uint32_t op2)
+1027:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1028:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1029:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1030:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sasx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1031:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1032:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1033:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1034:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __QASX(uint32_t op1, uint32_t op2)
+1035:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1036:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1037:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1038:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("qasx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1039:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1040:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1041:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1042:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SHASX(uint32_t op1, uint32_t op2)
+1043:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1044:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1045:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1046:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("shasx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1047:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1048:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1049:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1050:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UASX(uint32_t op1, uint32_t op2)
+1051:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1052:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1053:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1054:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uasx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1055:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1056:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1057:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1058:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UQASX(uint32_t op1, uint32_t op2)
+1059:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1060:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1061:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1062:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uqasx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1063:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1064:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1065:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1066:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UHASX(uint32_t op1, uint32_t op2)
+1067:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1068:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1069:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1070:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uhasx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1071:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1072:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1073:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1074:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SSAX(uint32_t op1, uint32_t op2)
+1075:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1076:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1077:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1078:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("ssax %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1079:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1080:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1081:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1082:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __QSAX(uint32_t op1, uint32_t op2)
+1083:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1084:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1085:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1086:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("qsax %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1087:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1088:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1089:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1090:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SHSAX(uint32_t op1, uint32_t op2)
+1091:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1092:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1093:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1094:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("shsax %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1095:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1096:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1097:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1098:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __USAX(uint32_t op1, uint32_t op2)
+1099:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1100:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1101:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1102:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("usax %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1103:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1104:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1105:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1106:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UQSAX(uint32_t op1, uint32_t op2)
+1107:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1108:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1109:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1110:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uqsax %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1111:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1112:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1113:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1114:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UHSAX(uint32_t op1, uint32_t op2)
+1115:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1116:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1117:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1118:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uhsax %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1119:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1120:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1121:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1122:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __USAD8(uint32_t op1, uint32_t op2)
+1123:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1124:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1125:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1126:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("usad8 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1127:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1128:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1129:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1130:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __USADA8(uint32_t op1, uint32_t op2, ui
+1131:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1132:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1133:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1134:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("usada8 %0, %1, %2, %3" : "=r" (result) : "r" (op1), "r" (op2), "r" (op3) );
+1135:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1136:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1137:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1138:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __SSAT16(ARG1,ARG2) \
+1139:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** ({                          \
+1140:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   int32_t __RES, __ARG1 = (ARG1); \
+1141:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM ("ssat16 %0, %1, %2" : "=r" (__RES) :  "I" (ARG2), "r" (__ARG1) ); \
+1142:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __RES; \
+1143:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  })
+1144:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1145:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #define __USAT16(ARG1,ARG2) \
+1146:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** ({                          \
+1147:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t __RES, __ARG1 = (ARG1); \
+1148:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM ("usat16 %0, %1, %2" : "=r" (__RES) :  "I" (ARG2), "r" (__ARG1) ); \
+1149:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __RES; \
+1150:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****  })
+1151:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1152:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UXTB16(uint32_t op1)
+1153:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1154:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1155:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1156:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uxtb16 %0, %1" : "=r" (result) : "r" (op1));
+1157:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1158:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1159:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1160:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __UXTAB16(uint32_t op1, uint32_t op2)
+1161:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1162:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1163:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1164:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("uxtab16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1165:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1166:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1167:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1168:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SXTB16(uint32_t op1)
+1169:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1170:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1171:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1172:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sxtb16 %0, %1" : "=r" (result) : "r" (op1));
+1173:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1174:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1175:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1176:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SXTAB16(uint32_t op1, uint32_t op2)
+1177:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1178:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1179:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1180:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sxtab16 %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1181:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1182:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1183:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1184:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMUAD  (uint32_t op1, uint32_t op2)
+1185:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1186:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1187:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1188:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smuad %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1189:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1190:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1191:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1192:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMUADX (uint32_t op1, uint32_t op2)
+1193:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1194:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1195:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1196:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smuadx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1197:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1198:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1199:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1200:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMLAD (uint32_t op1, uint32_t op2, ui
+1201:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1202:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1203:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1204:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlad %0, %1, %2, %3" : "=r" (result) : "r" (op1), "r" (op2), "r" (op3) );
+1205:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1206:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1207:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1208:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMLADX (uint32_t op1, uint32_t op2, u
+1209:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1210:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1211:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1212:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smladx %0, %1, %2, %3" : "=r" (result) : "r" (op1), "r" (op2), "r" (op3) );
+1213:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1214:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1215:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1216:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint64_t __SMLALD (uint32_t op1, uint32_t op2, u
+1217:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1218:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   union llreg_u{
+1219:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t w32[2];
+1220:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint64_t w64;
+1221:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   } llr;
+1222:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   llr.w64 = acc;
+1223:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1224:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #ifndef __ARMEB__   /* Little endian */
+1225:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlald %0, %1, %2, %3" : "=r" (llr.w32[0]), "=r" (llr.w32[1]): "r" (op1), "r" (o
+1226:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else               /* Big endian */
+1227:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlald %0, %1, %2, %3" : "=r" (llr.w32[1]), "=r" (llr.w32[0]): "r" (op1), "r" (o
+1228:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+1229:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1230:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(llr.w64);
+1231:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1232:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1233:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint64_t __SMLALDX (uint32_t op1, uint32_t op2, 
+1234:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1235:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   union llreg_u{
+1236:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t w32[2];
+1237:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint64_t w64;
+1238:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   } llr;
+1239:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   llr.w64 = acc;
+1240:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1241:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #ifndef __ARMEB__   /* Little endian */
+1242:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlaldx %0, %1, %2, %3" : "=r" (llr.w32[0]), "=r" (llr.w32[1]): "r" (op1), "r" (
+1243:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else               /* Big endian */
+1244:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlaldx %0, %1, %2, %3" : "=r" (llr.w32[1]), "=r" (llr.w32[0]): "r" (op1), "r" (
+1245:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+1246:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1247:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(llr.w64);
+1248:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1249:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1250:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMUSD  (uint32_t op1, uint32_t op2)
+1251:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1252:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1253:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1254:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smusd %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1255:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1256:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1257:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1258:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMUSDX (uint32_t op1, uint32_t op2)
+1259:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1260:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1261:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1262:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smusdx %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+1263:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1264:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1265:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1266:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMLSD (uint32_t op1, uint32_t op2, ui
+1267:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1268:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1269:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1270:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlsd %0, %1, %2, %3" : "=r" (result) : "r" (op1), "r" (op2), "r" (op3) );
+1271:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1272:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1273:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1274:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SMLSDX (uint32_t op1, uint32_t op2, u
+1275:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1276:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+1277:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1278:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlsdx %0, %1, %2, %3" : "=r" (result) : "r" (op1), "r" (op2), "r" (op3) );
+1279:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+1280:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1281:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1282:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint64_t __SMLSLD (uint32_t op1, uint32_t op2, u
+1283:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1284:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   union llreg_u{
+1285:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t w32[2];
+1286:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint64_t w64;
+1287:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   } llr;
+1288:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   llr.w64 = acc;
+1289:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1290:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #ifndef __ARMEB__   /* Little endian */
+1291:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlsld %0, %1, %2, %3" : "=r" (llr.w32[0]), "=r" (llr.w32[1]): "r" (op1), "r" (o
+1292:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else               /* Big endian */
+1293:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlsld %0, %1, %2, %3" : "=r" (llr.w32[1]), "=r" (llr.w32[0]): "r" (op1), "r" (o
+1294:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+1295:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1296:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(llr.w64);
+1297:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1298:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1299:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint64_t __SMLSLDX (uint32_t op1, uint32_t op2, 
+1300:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1301:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   union llreg_u{
+1302:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint32_t w32[2];
+1303:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****     uint64_t w64;
+1304:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   } llr;
+1305:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   llr.w64 = acc;
+1306:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1307:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #ifndef __ARMEB__   /* Little endian */
+1308:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlsldx %0, %1, %2, %3" : "=r" (llr.w32[0]), "=r" (llr.w32[1]): "r" (op1), "r" (
+1309:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #else               /* Big endian */
+1310:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("smlsldx %0, %1, %2, %3" : "=r" (llr.w32[1]), "=r" (llr.w32[0]): "r" (op1), "r" (
+1311:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** #endif
+1312:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1313:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(llr.w64);
+1314:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+1315:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1316:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** __attribute__( ( always_inline ) ) __STATIC_INLINE uint32_t __SEL  (uint32_t op1, uint32_t op2)
+ 180              		.loc 2 1316 61 view .LVU44
+ 181              	.LBB24:
+1317:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+1318:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   uint32_t result;
+ 182              		.loc 2 1318 3 view .LVU45
+1319:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+1320:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   __ASM volatile ("sel %0, %1, %2" : "=r" (result) : "r" (op1), "r" (op2) );
+ 183              		.loc 2 1320 3 view .LVU46
+ 184              		.syntax unified
+ 185              	@ 1320 ".././hal//stm32f3/CMSIS/core/cmsis_gcc.h" 1
+ 186 0018 A4FA83F3 		sel r3, r4, r3
+ 187              	@ 0 "" 2
+ 188              	.LVL12:
+1321:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 189              		.loc 2 1321 3 view .LVU47
+ 190              		.loc 2 1321 3 is_stmt 0 view .LVU48
+ 191              		.thumb
+ 192              		.syntax unified
+ 193              	.LBE24:
+ 194              	.LBE23:
+ 195              	.LBE20:
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 196              		.loc 1 37 38 is_stmt 1 discriminator 3 view .LVU49
+  37:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 197              		.loc 1 37 28 discriminator 1 view .LVU50
+ 198 001c 8A42     		cmp	r2, r1
+ 199 001e F7D1     		bne	.L14
+ 200              	.LBE26:
+  52:simpleserial-bfmax-32bit-dsp.c **** 
+ 201              		.loc 1 52 8 is_stmt 0 view .LVU51
+ 202 0020 C3F30726 		ubfx	r6, r3, #8, #8
+ 203 0024 C3F30742 		ubfx	r2, r3, #16, #8
+ 204 0028 9642     		cmp	r6, r2
+ 205 002a 38BF     		it	cc
+ 206 002c 1646     		movcc	r6, r2
+ 207 002e 1A0E     		lsrs	r2, r3, #24
+ 208 0030 9642     		cmp	r6, r2
+ 209 0032 38BF     		it	cc
+ 210 0034 1646     		movcc	r6, r2
+ 211 0036 DBB2     		uxtb	r3, r3
+ 212              	.LVL13:
+  58:simpleserial-bfmax-32bit-dsp.c **** 
+ 213              		.loc 1 58 43 view .LVU52
+ 214 0038 9E42     		cmp	r6, r3
+ 215 003a 38BF     		it	cc
+ 216 003c 1E46     		movcc	r6, r3
+ 217 003e 06EB0626 		add	r6, r6, r6, lsl #8
+  60:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+ 218              		.loc 1 60 5 view .LVU53
+ 219 0042 0024     		movs	r4, #0
+ 220              	.LVL14:
+  60:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+ 221              		.loc 1 60 5 view .LVU54
+ 222 0044 FFF7FEFF 		bl	trigger_high
+ 223              	.LVL15:
+  60:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+ 224              		.loc 1 60 5 view .LVU55
+ 225 0048 06EB0646 		add	r6, r6, r6, lsl #16
+  48:simpleserial-bfmax-32bit-dsp.c ****     uint8_t max_val = max_bytes[0];
+ 226              		.loc 1 48 5 is_stmt 1 view .LVU56
+ 227              	.LVL16:
+  49:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[1] > max_val) max_val = max_bytes[1];
+ 228              		.loc 1 49 5 view .LVU57
+  50:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[2] > max_val) max_val = max_bytes[2];
+ 229              		.loc 1 50 5 view .LVU58
+  51:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[3] > max_val) max_val = max_bytes[3];
+ 230              		.loc 1 51 5 view .LVU59
+  52:simpleserial-bfmax-32bit-dsp.c **** 
+ 231              		.loc 1 52 5 view .LVU60
+  58:simpleserial-bfmax-32bit-dsp.c **** 
+ 232              		.loc 1 58 5 view .LVU61
+  60:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+ 233              		.loc 1 60 5 view .LVU62
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 234              		.loc 1 61 5 view .LVU63
+ 235              	.LBB27:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 236              		.loc 1 61 10 view .LVU64
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 237              		.loc 1 61 28 discriminator 1 view .LVU65
+ 238              	.LBB28:
+ 239              	.LBB29:
+ 240              	.LBB30:
+1320:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 241              		.loc 2 1320 3 is_stmt 0 view .LVU66
+ 242 004c 4FF0FF31 		mov	r1, #-1
+ 243 0050 281F     		subs	r0, r5, #4
+ 244 0052 2246     		mov	r2, r4
+ 245 0054 02E0     		b	.L19
+ 246              	.LVL17:
+ 247              	.L15:
+1320:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 248              		.loc 2 1320 3 view .LVU67
+ 249              	.LBE30:
+ 250              	.LBE29:
+ 251              	.LBE28:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 252              		.loc 1 61 28 discriminator 1 view .LVU68
+ 253 0056 0134     		adds	r4, r4, #1
+ 254              	.LVL18:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 255              		.loc 1 61 28 discriminator 1 view .LVU69
+ 256 0058 BC42     		cmp	r4, r7
+ 257 005a 19D0     		beq	.L13
+ 258              	.LVL19:
+ 259              	.L19:
+ 260              	.LBB37:
+  62:simpleserial-bfmax-32bit-dsp.c ****         
+ 261              		.loc 1 62 9 is_stmt 1 view .LVU70
+  68:simpleserial-bfmax-32bit-dsp.c ****         
+ 262              		.loc 1 68 9 view .LVU71
+ 263              	.LBB32:
+ 264              	.LBI32:
+ 905:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 265              		.loc 2 905 61 view .LVU72
+ 266              	.LBB33:
+ 907:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 267              		.loc 2 907 3 view .LVU73
+ 909:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 268              		.loc 2 909 3 view .LVU74
+ 269 005c 50F8043F 		ldr	r3, [r0, #4]!
+ 270              	.LVL20:
+ 909:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 271              		.loc 2 909 3 is_stmt 0 view .LVU75
+ 272              		.syntax unified
+ 273              	@ 909 ".././hal//stm32f3/CMSIS/core/cmsis_gcc.h" 1
+ 274 0060 C3FA46F3 		usub8 r3, r3, r6
+ 275              	@ 0 "" 2
+ 276              	.LVL21:
+ 910:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 277              		.loc 2 910 3 is_stmt 1 view .LVU76
+ 910:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** }
+ 278              		.loc 2 910 3 is_stmt 0 view .LVU77
+ 279              		.thumb
+ 280              		.syntax unified
+ 281              	.LBE33:
+ 282              	.LBE32:
+  72:simpleserial-bfmax-32bit-dsp.c ****         
+ 283              		.loc 1 72 9 is_stmt 1 view .LVU78
+ 284              	.LBB34:
+ 285              	.LBI29:
+1316:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** {
+ 286              		.loc 2 1316 61 view .LVU79
+ 287              	.LBB31:
+1318:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h **** 
+ 288              		.loc 2 1318 3 view .LVU80
+1320:.././hal//stm32f3/CMSIS/core/cmsis_gcc.h ****   return(result);
+ 289              		.loc 2 1320 3 view .LVU81
+ 290              		.syntax unified
+ 291              	@ 1320 ".././hal//stm32f3/CMSIS/core/cmsis_gcc.h" 1
+ 292 0064 A1FA82F5 		sel r5, r1, r2
+ 293              	@ 0 "" 2
+ 294              	.LVL22:
+ 295              		.loc 2 1321 3 view .LVU82
+ 296              		.loc 2 1321 3 is_stmt 0 view .LVU83
+ 297              		.thumb
+ 298              		.syntax unified
+ 299              	.LBE31:
+ 300              	.LBE34:
+  74:simpleserial-bfmax-32bit-dsp.c ****             trigger_low();
+ 301              		.loc 1 74 9 is_stmt 1 view .LVU84
+  74:simpleserial-bfmax-32bit-dsp.c ****             trigger_low();
+ 302              		.loc 1 74 9 is_stmt 0 view .LVU85
+ 303              	.LBE37:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 304              		.loc 1 61 38 is_stmt 1 discriminator 2 view .LVU86
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 305              		.loc 1 61 28 discriminator 1 view .LVU87
+ 306              	.LBB38:
+  74:simpleserial-bfmax-32bit-dsp.c ****             trigger_low();
+ 307              		.loc 1 74 12 is_stmt 0 view .LVU88
+ 308 0068 002D     		cmp	r5, #0
+ 309 006a F4D0     		beq	.L15
+ 310              	.LBB35:
+  75:simpleserial-bfmax-32bit-dsp.c ****             /* Trovato il blocco! Identificazione dell'indice esatto.
+ 311              		.loc 1 75 13 is_stmt 1 view .LVU89
+ 312 006c FFF7FEFF 		bl	trigger_low
+ 313              	.LVL23:
+  78:simpleserial-bfmax-32bit-dsp.c ****             if (match_bytes[0]){
+ 314              		.loc 1 78 13 view .LVU90
+  79:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+ 315              		.loc 1 79 13 view .LVU91
+  81:simpleserial-bfmax-32bit-dsp.c ****             }
+ 316              		.loc 1 81 24 is_stmt 0 view .LVU92
+ 317 0070 A000     		lsls	r0, r4, #2
+  79:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+ 318              		.loc 1 79 16 view .LVU93
+ 319 0072 EBB2     		uxtb	r3, r5
+  81:simpleserial-bfmax-32bit-dsp.c ****             }
+ 320              		.loc 1 81 24 view .LVU94
+ 321 0074 80B2     		uxth	r0, r0
+  79:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+ 322              		.loc 1 79 16 view .LVU95
+ 323 0076 43B9     		cbnz	r3, .L16
+  83:simpleserial-bfmax-32bit-dsp.c ****             {
+ 324              		.loc 1 83 13 is_stmt 1 view .LVU96
+  83:simpleserial-bfmax-32bit-dsp.c ****             {
+ 325              		.loc 1 83 16 is_stmt 0 view .LVU97
+ 326 0078 15F47F4F 		tst	r5, #65280
+ 327 007c 0AD1     		bne	.L24
+  88:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+ 328              		.loc 1 88 13 is_stmt 1 view .LVU98
+  88:simpleserial-bfmax-32bit-dsp.c ****                 //trigger_low();
+ 329              		.loc 1 88 16 is_stmt 0 view .LVU99
+ 330 007e 15F47F0F 		tst	r5, #16711680
+  90:simpleserial-bfmax-32bit-dsp.c ****             }
+ 331              		.loc 1 90 17 is_stmt 1 view .LVU100
+  90:simpleserial-bfmax-32bit-dsp.c ****             }
+ 332              		.loc 1 90 24 is_stmt 0 view .LVU101
+ 333 0082 14BF     		ite	ne
+ 334 0084 0230     		addne	r0, r0, #2
+  94:simpleserial-bfmax-32bit-dsp.c ****         }
+ 335              		.loc 1 94 13 is_stmt 1 view .LVU102
+  94:simpleserial-bfmax-32bit-dsp.c ****         }
+ 336              		.loc 1 94 20 is_stmt 0 view .LVU103
+ 337 0086 0330     		addeq	r0, r0, #3
+ 338 0088 80B2     		uxth	r0, r0
+ 339              	.L16:
+ 340              	.LVL24:
+  94:simpleserial-bfmax-32bit-dsp.c ****         }
+ 341              		.loc 1 94 20 view .LVU104
+ 342              	.LBE35:
+ 343              	.LBE38:
+ 344              	.LBE27:
+  99:simpleserial-bfmax-32bit-dsp.c **** 
+ 345              		.loc 1 99 1 view .LVU105
+ 346 008a F8BD     		pop	{r3, r4, r5, r6, r7, pc}
+ 347              	.LVL25:
+ 348              	.L23:
+  48:simpleserial-bfmax-32bit-dsp.c ****     uint8_t max_val = max_bytes[0];
+ 349              		.loc 1 48 5 is_stmt 1 view .LVU106
+  49:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[1] > max_val) max_val = max_bytes[1];
+ 350              		.loc 1 49 5 view .LVU107
+  50:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[2] > max_val) max_val = max_bytes[2];
+ 351              		.loc 1 50 5 view .LVU108
+  51:simpleserial-bfmax-32bit-dsp.c ****     if (max_bytes[3] > max_val) max_val = max_bytes[3];
+ 352              		.loc 1 51 5 view .LVU109
+  52:simpleserial-bfmax-32bit-dsp.c **** 
+ 353              		.loc 1 52 5 view .LVU110
+  58:simpleserial-bfmax-32bit-dsp.c **** 
+ 354              		.loc 1 58 5 view .LVU111
+  60:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < len32; i++) {
+ 355              		.loc 1 60 5 view .LVU112
+ 356 008c FFF7FEFF 		bl	trigger_high
+ 357              	.LVL26:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 358              		.loc 1 61 5 view .LVU113
+ 359              	.LBB40:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 360              		.loc 1 61 10 view .LVU114
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 361              		.loc 1 61 28 discriminator 1 view .LVU115
+ 362              	.L13:
+  61:simpleserial-bfmax-32bit-dsp.c ****         uint32_t val = arr32[i];
+ 363              		.loc 1 61 28 is_stmt 0 discriminator 1 view .LVU116
+ 364              	.LBE40:
+  98:simpleserial-bfmax-32bit-dsp.c **** }
+ 365              		.loc 1 98 12 view .LVU117
+ 366 0090 0020     		movs	r0, #0
+  99:simpleserial-bfmax-32bit-dsp.c **** 
+ 367              		.loc 1 99 1 view .LVU118
+ 368 0092 F8BD     		pop	{r3, r4, r5, r6, r7, pc}
+ 369              	.LVL27:
+ 370              	.L24:
+ 371              	.LBB41:
+ 372              	.LBB39:
+ 373              	.LBB36:
+  86:simpleserial-bfmax-32bit-dsp.c ****             }
+ 374              		.loc 1 86 17 is_stmt 1 view .LVU119
+  86:simpleserial-bfmax-32bit-dsp.c ****             }
+ 375              		.loc 1 86 24 is_stmt 0 view .LVU120
+ 376 0094 0130     		adds	r0, r0, #1
+ 377 0096 80B2     		uxth	r0, r0
+ 378              	.LVL28:
+  86:simpleserial-bfmax-32bit-dsp.c ****             }
+ 379              		.loc 1 86 24 view .LVU121
+ 380              	.LBE36:
+ 381              	.LBE39:
+ 382              	.LBE41:
+  99:simpleserial-bfmax-32bit-dsp.c **** 
+ 383              		.loc 1 99 1 view .LVU122
+ 384 0098 F8BD     		pop	{r3, r4, r5, r6, r7, pc}
+  99:simpleserial-bfmax-32bit-dsp.c **** 
+ 385              		.loc 1 99 1 view .LVU123
+ 386              		.cfi_endproc
+ 387              	.LFE123:
+ 389 009a 00BF     		.section	.text.cmd_profile_argmax,"ax",%progbits
+ 390              		.align	1
+ 391              		.p2align 2,,3
+ 392              		.global	cmd_profile_argmax
+ 393              		.syntax unified
+ 394              		.thumb
+ 395              		.thumb_func
+ 397              	cmd_profile_argmax:
+ 398              	.LVL29:
+ 399              	.LFB125:
+ 127:simpleserial-bfmax-32bit-dsp.c ****     if (len < 2) return 0x01;
+ 400              		.loc 1 127 54 is_stmt 1 view -0
+ 401              		.cfi_startproc
+ 402              		@ args = 0, pretend = 0, frame = 8
+ 403              		@ frame_needed = 0, uses_anonymous_args = 0
+ 128:simpleserial-bfmax-32bit-dsp.c **** 
+ 404              		.loc 1 128 5 view .LVU125
+ 128:simpleserial-bfmax-32bit-dsp.c **** 
+ 405              		.loc 1 128 8 is_stmt 0 view .LVU126
+ 406 0000 0129     		cmp	r1, #1
+ 407 0002 3BD9     		bls	.L28
+ 130:simpleserial-bfmax-32bit-dsp.c ****     if (target_pos >= N_BITS) {
+ 408              		.loc 1 130 5 is_stmt 1 view .LVU127
+ 409              	.LVL30:
+ 131:simpleserial-bfmax-32bit-dsp.c ****         target_pos = N_BITS - 1;
+ 410              		.loc 1 131 5 view .LVU128
+ 127:simpleserial-bfmax-32bit-dsp.c ****     if (len < 2) return 0x01;
+ 411              		.loc 1 127 54 is_stmt 0 view .LVU129
+ 412 0004 10B5     		push	{r4, lr}
+ 413              	.LCFI1:
+ 414              		.cfi_def_cfa_offset 8
+ 415              		.cfi_offset 4, -8
+ 416              		.cfi_offset 14, -4
+ 131:simpleserial-bfmax-32bit-dsp.c ****         target_pos = N_BITS - 1;
+ 417              		.loc 1 131 8 view .LVU130
+ 418 0006 0388     		ldrh	r3, [r0]	@ unaligned
+ 419 0008 1D49     		ldr	r1, .L34
+ 420              	.LVL31:
+ 421              	.LBB42:
+ 137:simpleserial-bfmax-32bit-dsp.c ****     }
+ 422              		.loc 1 137 40 view .LVU131
+ 423 000a 1E4C     		ldr	r4, .L34+4
+ 424              	.LBE42:
+ 131:simpleserial-bfmax-32bit-dsp.c ****         target_pos = N_BITS - 1;
+ 425              		.loc 1 131 8 view .LVU132
+ 426 000c 5BBA     		rev16	r3, r3
+ 427 000e 9BB2     		uxth	r3, r3
+ 428 0010 40F2FF32 		movw	r2, #1023
+ 429 0014 9342     		cmp	r3, r2
+ 430 0016 28BF     		it	cs
+ 431 0018 1346     		movcs	r3, r2
+ 127:simpleserial-bfmax-32bit-dsp.c ****     if (len < 2) return 0x01;
+ 432              		.loc 1 127 54 view .LVU133
+ 433 001a 82B0     		sub	sp, sp, #8
+ 434              	.LCFI2:
+ 435              		.cfi_def_cfa_offset 16
+ 131:simpleserial-bfmax-32bit-dsp.c ****         target_pos = N_BITS - 1;
+ 436              		.loc 1 131 8 view .LVU134
+ 437 001c 9E46     		mov	lr, r3
+ 438              	.LVL32:
+ 136:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 439              		.loc 1 136 5 is_stmt 1 view .LVU135
+ 440              	.LBB43:
+ 136:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 441              		.loc 1 136 10 view .LVU136
+ 136:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 442              		.loc 1 136 28 discriminator 1 view .LVU137
+ 443 001e 01F58060 		add	r0, r1, #1024
+ 444              	.LVL33:
+ 136:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 445              		.loc 1 136 28 is_stmt 0 discriminator 1 view .LVU138
+ 446              	.LBE43:
+ 131:simpleserial-bfmax-32bit-dsp.c ****         target_pos = N_BITS - 1;
+ 447              		.loc 1 131 8 view .LVU139
+ 448 0022 0322     		movs	r2, #3
+ 449              	.LVL34:
+ 450              	.L27:
+ 451              	.LBB44:
+ 137:simpleserial-bfmax-32bit-dsp.c ****     }
+ 452              		.loc 1 137 9 is_stmt 1 view .LVU140
+ 137:simpleserial-bfmax-32bit-dsp.c ****     }
+ 453              		.loc 1 137 40 is_stmt 0 view .LVU141
+ 454 0024 A4FB02C3 		umull	ip, r3, r4, r2
+ 455 0028 DB08     		lsrs	r3, r3, #3
+ 456 002a 03EB8303 		add	r3, r3, r3, lsl #2
+ 457 002e A2EB4303 		sub	r3, r2, r3, lsl #1
+ 137:simpleserial-bfmax-32bit-dsp.c ****     }
+ 458              		.loc 1 137 18 view .LVU142
+ 459 0032 01F8013F 		strb	r3, [r1, #1]!
+ 460              	.LVL35:
+ 136:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 461              		.loc 1 136 39 is_stmt 1 discriminator 3 view .LVU143
+ 136:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10);
+ 462              		.loc 1 136 28 discriminator 1 view .LVU144
+ 463 0036 8142     		cmp	r1, r0
+ 464 0038 02F10702 		add	r2, r2, #7
+ 465 003c F2D1     		bne	.L27
+ 466              	.LBE44:
+ 139:simpleserial-bfmax-32bit-dsp.c **** 
+ 467              		.loc 1 139 5 view .LVU145
+ 139:simpleserial-bfmax-32bit-dsp.c **** 
+ 468              		.loc 1 139 21 is_stmt 0 view .LVU146
+ 469 003e 1248     		ldr	r0, .L34+8
+ 470 0040 00EB0E03 		add	r3, r0, lr
+ 471 0044 0F22     		movs	r2, #15
+ 143:simpleserial-bfmax-32bit-dsp.c ****     //trigger_low();
+ 472              		.loc 1 143 32 view .LVU147
+ 473 0046 4FF48061 		mov	r1, #1024
+ 474              	.LVL36:
+ 143:simpleserial-bfmax-32bit-dsp.c ****     //trigger_low();
+ 475              		.loc 1 143 32 view .LVU148
+ 476 004a 3C30     		adds	r0, r0, #60
+ 139:simpleserial-bfmax-32bit-dsp.c **** 
+ 477              		.loc 1 139 21 view .LVU149
+ 478 004c 83F83C20 		strb	r2, [r3, #60]
+ 143:simpleserial-bfmax-32bit-dsp.c ****     //trigger_low();
+ 479              		.loc 1 143 5 is_stmt 1 view .LVU150
+ 143:simpleserial-bfmax-32bit-dsp.c ****     //trigger_low();
+ 480              		.loc 1 143 32 is_stmt 0 view .LVU151
+ 481 0050 FFF7FEFF 		bl	argmax_u8_vulnerable
+ 482              	.LVL37:
+ 143:simpleserial-bfmax-32bit-dsp.c ****     //trigger_low();
+ 483              		.loc 1 143 20 discriminator 1 view .LVU152
+ 484 0054 ADF80600 		strh	r0, [sp, #6]	@ movhi
+ 147:simpleserial-bfmax-32bit-dsp.c ****     resp[0] = (uint8_t)(found_col >> 8);
+ 485              		.loc 1 147 5 is_stmt 1 view .LVU153
+ 148:simpleserial-bfmax-32bit-dsp.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 486              		.loc 1 148 5 view .LVU154
+ 148:simpleserial-bfmax-32bit-dsp.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 487              		.loc 1 148 15 is_stmt 0 view .LVU155
+ 488 0058 BDF80630 		ldrh	r3, [sp, #6]
+ 149:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_put('r', 2, resp);
+ 489              		.loc 1 149 15 view .LVU156
+ 490 005c BDF80640 		ldrh	r4, [sp, #6]
+ 491 0060 8DF80540 		strb	r4, [sp, #5]
+ 148:simpleserial-bfmax-32bit-dsp.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 492              		.loc 1 148 15 view .LVU157
+ 493 0064 C3F30723 		ubfx	r3, r3, #8, #8
+ 150:simpleserial-bfmax-32bit-dsp.c **** 
+ 494              		.loc 1 150 5 view .LVU158
+ 495 0068 01AA     		add	r2, sp, #4
+ 496 006a 0221     		movs	r1, #2
+ 497 006c 7220     		movs	r0, #114
+ 148:simpleserial-bfmax-32bit-dsp.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 498              		.loc 1 148 15 view .LVU159
+ 499 006e 8DF80430 		strb	r3, [sp, #4]
+ 149:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_put('r', 2, resp);
+ 500              		.loc 1 149 5 is_stmt 1 view .LVU160
+ 150:simpleserial-bfmax-32bit-dsp.c **** 
+ 501              		.loc 1 150 5 view .LVU161
+ 502 0072 FFF7FEFF 		bl	simpleserial_put
+ 503              	.LVL38:
+ 152:simpleserial-bfmax-32bit-dsp.c **** }
+ 504              		.loc 1 152 5 view .LVU162
+ 152:simpleserial-bfmax-32bit-dsp.c **** }
+ 505              		.loc 1 152 12 is_stmt 0 view .LVU163
+ 506 0076 0020     		movs	r0, #0
+ 153:simpleserial-bfmax-32bit-dsp.c **** 
+ 507              		.loc 1 153 1 view .LVU164
+ 508 0078 02B0     		add	sp, sp, #8
+ 509              	.LCFI3:
+ 510              		.cfi_def_cfa_offset 8
+ 511              		@ sp needed
+ 512 007a 10BD     		pop	{r4, pc}
+ 513              	.LVL39:
+ 514              	.L28:
+ 515              	.LCFI4:
+ 516              		.cfi_def_cfa_offset 0
+ 517              		.cfi_restore 4
+ 518              		.cfi_restore 14
+ 128:simpleserial-bfmax-32bit-dsp.c **** 
+ 519              		.loc 1 128 25 discriminator 1 view .LVU165
+ 520 007c 0120     		movs	r0, #1
+ 521              	.LVL40:
+ 153:simpleserial-bfmax-32bit-dsp.c **** 
+ 522              		.loc 1 153 1 view .LVU166
+ 523 007e 7047     		bx	lr
+ 524              	.L35:
+ 525              		.align	2
+ 526              	.L34:
+ 527 0080 3B000000 		.word	.LANCHOR0+59
+ 528 0084 CDCCCCCC 		.word	-858993459
+ 529 0088 00000000 		.word	.LANCHOR0
+ 530              		.cfi_endproc
+ 531              	.LFE125:
+ 533              		.section	.text.update_sparse_vulnerable,"ax",%progbits
+ 534              		.align	1
+ 535              		.p2align 2,,3
+ 536              		.global	update_sparse_vulnerable
+ 537              		.syntax unified
+ 538              		.thumb
+ 539              		.thumb_func
+ 541              	update_sparse_vulnerable:
+ 542              	.LVL41:
+ 543              	.LFB124:
+ 105:simpleserial-bfmax-32bit-dsp.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 544              		.loc 1 105 68 is_stmt 1 view -0
+ 545              		.cfi_startproc
+ 546              		@ args = 0, pretend = 0, frame = 0
+ 547              		@ frame_needed = 0, uses_anonymous_args = 0
+ 106:simpleserial-bfmax-32bit-dsp.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 548              		.loc 1 106 5 view .LVU168
+ 106:simpleserial-bfmax-32bit-dsp.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 549              		.loc 1 106 41 is_stmt 0 view .LVU169
+ 550 0000 B0F5007F 		cmp	r0, #512
+ 551 0004 34BF     		ite	cc
+ 552 0006 0023     		movcc	r3, #0
+ 553 0008 0123     		movcs	r3, #1
+ 554              	.LVL42:
+ 107:simpleserial-bfmax-32bit-dsp.c **** 
+ 555              		.loc 1 107 5 is_stmt 1 view .LVU170
+ 107:simpleserial-bfmax-32bit-dsp.c **** 
+ 556              		.loc 1 107 11 is_stmt 0 view .LVU171
+ 557 000a B0F5007F 		cmp	r0, #512
+ 107:simpleserial-bfmax-32bit-dsp.c **** 
+ 558              		.loc 1 107 11 discriminator 1 view .LVU172
+ 559 000e 28BF     		it	cs
+ 560 0010 A0F50070 		subcs	r0, r0, #512
+ 561              	.LVL43:
+ 105:simpleserial-bfmax-32bit-dsp.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 562              		.loc 1 105 68 view .LVU173
+ 563 0014 30B5     		push	{r4, r5, lr}
+ 564              	.LCFI5:
+ 565              		.cfi_def_cfa_offset 12
+ 566              		.cfi_offset 4, -12
+ 567              		.cfi_offset 5, -8
+ 568              		.cfi_offset 14, -4
+ 107:simpleserial-bfmax-32bit-dsp.c **** 
+ 569              		.loc 1 107 11 discriminator 1 view .LVU174
+ 570 0016 28BF     		it	cs
+ 571 0018 80B2     		uxthcs	r0, r0
+ 572              	.LVL44:
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 573              		.loc 1 109 5 is_stmt 1 view .LVU175
+ 574              	.LBB45:
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 575              		.loc 1 109 10 view .LVU176
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 576              		.loc 1 109 27 discriminator 1 view .LVU177
+ 577 001a 144D     		ldr	r5, .L44
+ 578 001c 002B     		cmp	r3, #0
+ 579 001e 14BF     		ite	ne
+ 580 0020 1E23     		movne	r3, #30
+ 581              	.LVL45:
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 582              		.loc 1 109 27 is_stmt 0 discriminator 1 view .LVU178
+ 583 0022 0023     		moveq	r3, #0
+ 584 0024 A3F1020C 		sub	ip, r3, #2
+ 585 0028 05F11C04 		add	r4, r5, #28
+ 586 002c AC44     		add	ip, ip, r5
+ 587 002e 1C44     		add	r4, r4, r3
+ 588              	.LVL46:
+ 589              	.L40:
+ 590              	.LBB46:
+ 110:simpleserial-bfmax-32bit-dsp.c ****         if (row >= R_BITS) {
+ 591              		.loc 1 110 9 is_stmt 1 view .LVU179
+ 112:simpleserial-bfmax-32bit-dsp.c ****         }
+ 592              		.loc 1 112 13 view .LVU180
+ 110:simpleserial-bfmax-32bit-dsp.c ****         if (row >= R_BITS) {
+ 593              		.loc 1 110 15 is_stmt 0 view .LVU181
+ 594 0030 3CF8023F 		ldrh	r3, [ip, #2]!
+ 110:simpleserial-bfmax-32bit-dsp.c ****         if (row >= R_BITS) {
+ 595              		.loc 1 110 15 view .LVU182
+ 596 0034 0344     		add	r3, r3, r0
+ 597 0036 9BB2     		uxth	r3, r3
+ 598              	.LVL47:
+ 111:simpleserial-bfmax-32bit-dsp.c ****             row -= R_BITS;
+ 599              		.loc 1 111 9 is_stmt 1 view .LVU183
+ 111:simpleserial-bfmax-32bit-dsp.c ****             row -= R_BITS;
+ 600              		.loc 1 111 12 is_stmt 0 view .LVU184
+ 601 0038 B3F5007F 		cmp	r3, #512
+ 112:simpleserial-bfmax-32bit-dsp.c ****         }
+ 602              		.loc 1 112 17 view .LVU185
+ 603 003c 24BF     		itt	cs
+ 604 003e A3F50073 		subcs	r3, r3, #512
+ 605              	.LVL48:
+ 112:simpleserial-bfmax-32bit-dsp.c ****         }
+ 606              		.loc 1 112 17 view .LVU186
+ 607 0042 9BB2     		uxthcs	r3, r3
+ 608              	.LVL49:
+ 115:simpleserial-bfmax-32bit-dsp.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 609              		.loc 1 115 9 is_stmt 1 view .LVU187
+ 115:simpleserial-bfmax-32bit-dsp.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 610              		.loc 1 115 22 is_stmt 0 view .LVU188
+ 611 0044 2B44     		add	r3, r3, r5
+ 612              	.LVL50:
+ 115:simpleserial-bfmax-32bit-dsp.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 613              		.loc 1 115 22 view .LVU189
+ 614 0046 93F83C24 		ldrb	r2, [r3, #1084]	@ zero_extendqisi2
+ 120:simpleserial-bfmax-32bit-dsp.c ****     }
+ 615              		.loc 1 120 20 view .LVU190
+ 616 004a 93F83CE0 		ldrb	lr, [r3, #60]	@ zero_extendqisi2
+ 116:simpleserial-bfmax-32bit-dsp.c **** 
+ 617              		.loc 1 116 16 view .LVU191
+ 618 004e 012A     		cmp	r2, #1
+ 619              	.LVL51:
+ 116:simpleserial-bfmax-32bit-dsp.c **** 
+ 620              		.loc 1 116 16 view .LVU192
+ 621 0050 14BF     		ite	ne
+ 622 0052 0121     		movne	r1, #1
+ 623 0054 FF21     		moveq	r1, #255
+ 115:simpleserial-bfmax-32bit-dsp.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 624              		.loc 1 115 28 view .LVU193
+ 625 0056 82F00102 		eor	r2, r2, #1
+ 120:simpleserial-bfmax-32bit-dsp.c ****     }
+ 626              		.loc 1 120 20 view .LVU194
+ 627 005a 7144     		add	r1, r1, lr
+ 628              	.LBE46:
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 629              		.loc 1 109 27 discriminator 1 view .LVU195
+ 630 005c 6445     		cmp	r4, ip
+ 631              	.LBB47:
+ 115:simpleserial-bfmax-32bit-dsp.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 632              		.loc 1 115 28 view .LVU196
+ 633 005e 83F83C24 		strb	r2, [r3, #1084]
+ 116:simpleserial-bfmax-32bit-dsp.c **** 
+ 634              		.loc 1 116 9 is_stmt 1 view .LVU197
+ 120:simpleserial-bfmax-32bit-dsp.c ****     }
+ 635              		.loc 1 120 9 view .LVU198
+ 120:simpleserial-bfmax-32bit-dsp.c ****     }
+ 636              		.loc 1 120 18 is_stmt 0 view .LVU199
+ 637 0062 83F83C10 		strb	r1, [r3, #60]
+ 638              	.LBE47:
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 639              		.loc 1 109 40 is_stmt 1 discriminator 2 view .LVU200
+ 109:simpleserial-bfmax-32bit-dsp.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+ 640              		.loc 1 109 27 discriminator 1 view .LVU201
+ 641 0066 E3D1     		bne	.L40
+ 642              	.LBE45:
+ 122:simpleserial-bfmax-32bit-dsp.c **** 
+ 643              		.loc 1 122 1 is_stmt 0 view .LVU202
+ 644 0068 30BD     		pop	{r4, r5, pc}
+ 645              	.L45:
+ 646 006a 00BF     		.align	2
+ 647              	.L44:
+ 648 006c 00000000 		.word	.LANCHOR0
+ 649              		.cfi_endproc
+ 650              	.LFE124:
+ 652              		.section	.text.cmd_run_decoder,"ax",%progbits
+ 653              		.align	1
+ 654              		.p2align 2,,3
+ 655              		.global	cmd_run_decoder
+ 656              		.syntax unified
+ 657              		.thumb
+ 658              		.thumb_func
+ 660              	cmd_run_decoder:
+ 661              	.LVL52:
+ 662              	.LFB127:
+ 167:simpleserial-bfmax-32bit-dsp.c **** 
+ 168:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+ 169:simpleserial-bfmax-32bit-dsp.c ****  * COMANDO SIMPLESERIAL 'd': Esecuzione Singola Traccia Decoder
+ 170:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+ 171:simpleserial-bfmax-32bit-dsp.c **** uint8_t cmd_run_decoder(uint8_t* in, uint8_t len) {
+ 663              		.loc 1 171 51 is_stmt 1 view -0
+ 664              		.cfi_startproc
+ 665              		@ args = 0, pretend = 0, frame = 8
+ 666              		@ frame_needed = 0, uses_anonymous_args = 0
+ 172:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 667              		.loc 1 172 5 view .LVU204
+ 668              	.LBB48:
+ 669              		.loc 1 172 10 view .LVU205
+ 670              		.loc 1 172 28 discriminator 1 view .LVU206
+ 671              	.LBE48:
+ 171:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 672              		.loc 1 171 51 is_stmt 0 view .LVU207
+ 673 0000 F0B5     		push	{r4, r5, r6, r7, lr}
+ 674              	.LCFI6:
+ 675              		.cfi_def_cfa_offset 20
+ 676              		.cfi_offset 4, -20
+ 677              		.cfi_offset 5, -16
+ 678              		.cfi_offset 6, -12
+ 679              		.cfi_offset 7, -8
+ 680              		.cfi_offset 14, -4
+ 681 0002 254C     		ldr	r4, .L57
+ 682              	.LBB49:
+ 173:simpleserial-bfmax-32bit-dsp.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 683              		.loc 1 173 16 view .LVU208
+ 684 0004 254D     		ldr	r5, .L57+4
+ 685              	.LBE49:
+ 171:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 686              		.loc 1 171 51 view .LVU209
+ 687 0006 83B0     		sub	sp, sp, #12
+ 688              	.LCFI7:
+ 689              		.cfi_def_cfa_offset 32
+ 690              	.LBB50:
+ 691              		.loc 1 173 24 view .LVU210
+ 692 0008 4FF0000C 		mov	ip, #0
+ 693              	.LVL53:
+ 694              	.L47:
+ 695              		.loc 1 173 9 is_stmt 1 view .LVU211
+ 696              		.loc 1 173 24 is_stmt 0 view .LVU212
+ 697 000c BCFBF1F3 		udiv	r3, ip, r1
+ 698 0010 01FB13C3 		mls	r3, r1, r3, ip
+ 699              		.loc 1 173 16 view .LVU213
+ 700 0014 C35C     		ldrb	r3, [r0, r3]	@ zero_extendqisi2
+ 701 0016 83EA0C03 		eor	r3, r3, ip
+ 702 001a DBB2     		uxtb	r3, r3
+ 703 001c A5FB03E2 		umull	lr, r2, r5, r3
+ 704 0020 D208     		lsrs	r2, r2, #3
+ 705 0022 02EB4202 		add	r2, r2, r2, lsl #1
+ 172:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 706              		.loc 1 172 28 discriminator 1 view .LVU214
+ 707 0026 0CF1010C 		add	ip, ip, #1
+ 708              	.LVL54:
+ 709              		.loc 1 173 16 view .LVU215
+ 710 002a A3EB8203 		sub	r3, r3, r2, lsl #2
+ 172:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 711              		.loc 1 172 28 discriminator 1 view .LVU216
+ 712 002e BCF5806F 		cmp	ip, #1024
+ 713              		.loc 1 173 16 view .LVU217
+ 714 0032 04F8013F 		strb	r3, [r4, #1]!
+ 172:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 715              		.loc 1 172 39 is_stmt 1 discriminator 3 view .LVU218
+ 716              	.LVL55:
+ 172:simpleserial-bfmax-32bit-dsp.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 717              		.loc 1 172 28 discriminator 1 view .LVU219
+ 718 0036 E9D1     		bne	.L47
+ 719 0038 0024     		movs	r4, #0
+ 720 003a 194E     		ldr	r6, .L57+8
+ 721              	.LBE50:
+ 722              	.LBB51:
+ 174:simpleserial-bfmax-32bit-dsp.c ****     }
+ 175:simpleserial-bfmax-32bit-dsp.c **** 
+ 176:simpleserial-bfmax-32bit-dsp.c ****     POS_T last_col = 0;
+ 177:simpleserial-bfmax-32bit-dsp.c **** 
+ 178:simpleserial-bfmax-32bit-dsp.c ****     for (uint8_t iter = 0; iter < ITER_MAX_BFMAX; iter++) {
+ 179:simpleserial-bfmax-32bit-dsp.c ****         
+ 180:simpleserial-bfmax-32bit-dsp.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 181:simpleserial-bfmax-32bit-dsp.c ****         
+ 182:simpleserial-bfmax-32bit-dsp.c ****         /* Timing Leak Phase */
+ 183:simpleserial-bfmax-32bit-dsp.c ****         last_col = argmax_u8_vulnerable(upc, N_BITS);
+ 184:simpleserial-bfmax-32bit-dsp.c ****         
+ 185:simpleserial-bfmax-32bit-dsp.c ****         upc[last_col] = 0;
+ 723              		.loc 1 185 23 is_stmt 0 view .LVU220
+ 724 003c 2746     		mov	r7, r4
+ 725 003e 0AE0     		b	.L51
+ 726              	.LVL56:
+ 727              	.L56:
+ 183:simpleserial-bfmax-32bit-dsp.c ****         
+ 728              		.loc 1 183 20 view .LVU221
+ 729 0040 FFF7FEFF 		bl	argmax_u8_vulnerable
+ 730              	.LVL57:
+ 731              		.loc 1 185 23 view .LVU222
+ 732 0044 3318     		adds	r3, r6, r0
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 733              		.loc 1 178 33 discriminator 1 view .LVU223
+ 734 0046 0134     		adds	r4, r4, #1
+ 735              	.LVL58:
+ 183:simpleserial-bfmax-32bit-dsp.c ****         
+ 736              		.loc 1 183 20 view .LVU224
+ 737 0048 0546     		mov	r5, r0
+ 738              	.LVL59:
+ 739              		.loc 1 185 9 is_stmt 1 view .LVU225
+ 740              		.loc 1 185 23 is_stmt 0 view .LVU226
+ 741 004a 83F83C70 		strb	r7, [r3, #60]
+ 186:simpleserial-bfmax-32bit-dsp.c **** 
+ 187:simpleserial-bfmax-32bit-dsp.c ****         /* Power Leak Phase */
+ 188:simpleserial-bfmax-32bit-dsp.c ****         update_sparse_vulnerable(last_col);
+ 742              		.loc 1 188 9 is_stmt 1 view .LVU227
+ 743 004e FFF7FEFF 		bl	update_sparse_vulnerable
+ 744              	.LVL60:
+ 189:simpleserial-bfmax-32bit-dsp.c ****         
+ 190:simpleserial-bfmax-32bit-dsp.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_low();
+ 745              		.loc 1 190 9 view .LVU228
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 746              		.loc 1 178 55 discriminator 2 view .LVU229
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 747              		.loc 1 178 33 discriminator 1 view .LVU230
+ 748 0052 142C     		cmp	r4, #20
+ 749 0054 14D0     		beq	.L55
+ 750              	.LVL61:
+ 751              	.L51:
+ 180:simpleserial-bfmax-32bit-dsp.c ****         
+ 752              		.loc 1 180 9 view .LVU231
+ 183:simpleserial-bfmax-32bit-dsp.c ****         
+ 753              		.loc 1 183 9 view .LVU232
+ 180:simpleserial-bfmax-32bit-dsp.c ****         
+ 754              		.loc 1 180 12 is_stmt 0 view .LVU233
+ 755 0056 022C     		cmp	r4, #2
+ 183:simpleserial-bfmax-32bit-dsp.c ****         
+ 756              		.loc 1 183 20 view .LVU234
+ 757 0058 1248     		ldr	r0, .L57+12
+ 758 005a 4FF48061 		mov	r1, #1024
+ 180:simpleserial-bfmax-32bit-dsp.c ****         
+ 759              		.loc 1 180 12 view .LVU235
+ 760 005e EFD8     		bhi	.L56
+ 180:simpleserial-bfmax-32bit-dsp.c ****         
+ 761              		.loc 1 180 56 is_stmt 1 discriminator 1 view .LVU236
+ 762 0060 FFF7FEFF 		bl	trigger_high
+ 763              	.LVL62:
+ 183:simpleserial-bfmax-32bit-dsp.c ****         
+ 764              		.loc 1 183 9 view .LVU237
+ 183:simpleserial-bfmax-32bit-dsp.c ****         
+ 765              		.loc 1 183 20 is_stmt 0 view .LVU238
+ 766 0064 4FF48061 		mov	r1, #1024
+ 767 0068 0E48     		ldr	r0, .L57+12
+ 768 006a FFF7FEFF 		bl	argmax_u8_vulnerable
+ 769              	.LVL63:
+ 185:simpleserial-bfmax-32bit-dsp.c **** 
+ 770              		.loc 1 185 9 is_stmt 1 view .LVU239
+ 185:simpleserial-bfmax-32bit-dsp.c **** 
+ 771              		.loc 1 185 23 is_stmt 0 view .LVU240
+ 772 006e 3318     		adds	r3, r6, r0
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 773              		.loc 1 178 33 discriminator 1 view .LVU241
+ 774 0070 0134     		adds	r4, r4, #1
+ 775              	.LVL64:
+ 185:simpleserial-bfmax-32bit-dsp.c **** 
+ 776              		.loc 1 185 23 view .LVU242
+ 777 0072 83F83C70 		strb	r7, [r3, #60]
+ 188:simpleserial-bfmax-32bit-dsp.c ****         
+ 778              		.loc 1 188 9 is_stmt 1 view .LVU243
+ 779 0076 FFF7FEFF 		bl	update_sparse_vulnerable
+ 780              	.LVL65:
+ 781              		.loc 1 190 9 view .LVU244
+ 782              		.loc 1 190 56 discriminator 1 view .LVU245
+ 783 007a FFF7FEFF 		bl	trigger_low
+ 784              	.LVL66:
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 785              		.loc 1 178 55 discriminator 2 view .LVU246
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 786              		.loc 1 178 33 discriminator 1 view .LVU247
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 787              		.loc 1 178 33 is_stmt 0 discriminator 1 view .LVU248
+ 788 007e EAE7     		b	.L51
+ 789              	.LVL67:
+ 790              	.L55:
+ 178:simpleserial-bfmax-32bit-dsp.c ****         
+ 791              		.loc 1 178 33 discriminator 1 view .LVU249
+ 792              	.LBE51:
+ 191:simpleserial-bfmax-32bit-dsp.c ****     }
+ 192:simpleserial-bfmax-32bit-dsp.c **** 
+ 193:simpleserial-bfmax-32bit-dsp.c ****     uint8_t resp[2] = { (uint8_t)(last_col >> 8), (uint8_t)(last_col & 0xFF) };
+ 793              		.loc 1 193 5 is_stmt 1 view .LVU250
+ 794              		.loc 1 193 13 is_stmt 0 view .LVU251
+ 795 0080 6DBA     		rev16	r5, r5
+ 796              	.LVL68:
+ 194:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_put('r', 2, resp);
+ 797              		.loc 1 194 5 view .LVU252
+ 798 0082 01AA     		add	r2, sp, #4
+ 799 0084 0221     		movs	r1, #2
+ 800 0086 7220     		movs	r0, #114
+ 193:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_put('r', 2, resp);
+ 801              		.loc 1 193 13 view .LVU253
+ 802 0088 ADF80450 		strh	r5, [sp, #4]	@ movhi
+ 803              		.loc 1 194 5 is_stmt 1 view .LVU254
+ 804 008c FFF7FEFF 		bl	simpleserial_put
+ 805              	.LVL69:
+ 195:simpleserial-bfmax-32bit-dsp.c ****     return 0x00;
+ 806              		.loc 1 195 5 view .LVU255
+ 196:simpleserial-bfmax-32bit-dsp.c **** }
+ 807              		.loc 1 196 1 is_stmt 0 view .LVU256
+ 808 0090 0020     		movs	r0, #0
+ 809 0092 03B0     		add	sp, sp, #12
+ 810              	.LCFI8:
+ 811              		.cfi_def_cfa_offset 20
+ 812              		@ sp needed
+ 813 0094 F0BD     		pop	{r4, r5, r6, r7, pc}
+ 814              	.L58:
+ 815 0096 00BF     		.align	2
+ 816              	.L57:
+ 817 0098 3B000000 		.word	.LANCHOR0+59
+ 818 009c ABAAAAAA 		.word	-1431655765
+ 819 00a0 00000000 		.word	.LANCHOR0
+ 820 00a4 3C000000 		.word	.LANCHOR0+60
+ 821              		.cfi_endproc
+ 822              	.LFE127:
+ 824              		.section	.text.startup.main,"ax",%progbits
+ 825              		.align	1
+ 826              		.p2align 2,,3
+ 827              		.global	main
+ 828              		.syntax unified
+ 829              		.thumb
+ 830              		.thumb_func
+ 832              	main:
+ 833              	.LFB128:
+ 197:simpleserial-bfmax-32bit-dsp.c **** 
+ 198:simpleserial-bfmax-32bit-dsp.c **** /* =========================================================================
+ 199:simpleserial-bfmax-32bit-dsp.c ****  * MAIN PROGRAM
+ 200:simpleserial-bfmax-32bit-dsp.c ****  * ========================================================================= */
+ 201:simpleserial-bfmax-32bit-dsp.c **** int main(void) {
+ 834              		.loc 1 201 16 is_stmt 1 view -0
+ 835              		.cfi_startproc
+ 836              		@ Volatile: function does not return.
+ 837              		@ args = 0, pretend = 0, frame = 8
+ 838              		@ frame_needed = 0, uses_anonymous_args = 0
+ 202:simpleserial-bfmax-32bit-dsp.c ****     platform_init();
+ 839              		.loc 1 202 5 view .LVU258
+ 201:simpleserial-bfmax-32bit-dsp.c ****     platform_init();
+ 840              		.loc 1 201 16 is_stmt 0 view .LVU259
+ 841 0000 00B5     		push	{lr}
+ 842              	.LCFI9:
+ 843              		.cfi_def_cfa_offset 4
+ 844              		.cfi_offset 14, -4
+ 845 0002 83B0     		sub	sp, sp, #12
+ 846              	.LCFI10:
+ 847              		.cfi_def_cfa_offset 16
+ 848              		.loc 1 202 5 view .LVU260
+ 849 0004 FFF7FEFF 		bl	platform_init
+ 850              	.LVL70:
+ 203:simpleserial-bfmax-32bit-dsp.c ****     init_uart();
+ 851              		.loc 1 203 5 is_stmt 1 view .LVU261
+ 852 0008 FFF7FEFF 		bl	init_uart
+ 853              	.LVL71:
+ 204:simpleserial-bfmax-32bit-dsp.c ****     trigger_setup();
+ 854              		.loc 1 204 5 view .LVU262
+ 855 000c FFF7FEFF 		bl	trigger_setup
+ 856              	.LVL72:
+ 205:simpleserial-bfmax-32bit-dsp.c **** 
+ 206:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_init();
+ 857              		.loc 1 206 5 view .LVU263
+ 858 0010 FFF7FEFF 		bl	simpleserial_init
+ 859              	.LVL73:
+ 207:simpleserial-bfmax-32bit-dsp.c **** 
+ 208:simpleserial-bfmax-32bit-dsp.c ****     uint8_t default_seed = 0x42;
+ 860              		.loc 1 208 5 view .LVU264
+ 861              		.loc 1 208 13 is_stmt 0 view .LVU265
+ 862 0014 4223     		movs	r3, #66
+ 209:simpleserial-bfmax-32bit-dsp.c ****     cmd_set_key(&default_seed, 1);
+ 863              		.loc 1 209 5 view .LVU266
+ 864 0016 0121     		movs	r1, #1
+ 865 0018 0DF10700 		add	r0, sp, #7
+ 208:simpleserial-bfmax-32bit-dsp.c ****     cmd_set_key(&default_seed, 1);
+ 866              		.loc 1 208 13 view .LVU267
+ 867 001c 8DF80730 		strb	r3, [sp, #7]
+ 868              		.loc 1 209 5 is_stmt 1 view .LVU268
+ 869 0020 FFF7FEFF 		bl	cmd_set_key
+ 870              	.LVL74:
+ 210:simpleserial-bfmax-32bit-dsp.c **** 
+ 211:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_addcmd('p', 2,  cmd_profile_argmax);
+ 871              		.loc 1 211 5 view .LVU269
+ 872 0024 084A     		ldr	r2, .L62
+ 873 0026 0221     		movs	r1, #2
+ 874 0028 7020     		movs	r0, #112
+ 875 002a FFF7FEFF 		bl	simpleserial_addcmd
+ 876              	.LVL75:
+ 212:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_addcmd('k', 16, cmd_set_key);
+ 877              		.loc 1 212 5 view .LVU270
+ 878 002e 074A     		ldr	r2, .L62+4
+ 879 0030 1021     		movs	r1, #16
+ 880 0032 6B20     		movs	r0, #107
+ 881 0034 FFF7FEFF 		bl	simpleserial_addcmd
+ 882              	.LVL76:
+ 213:simpleserial-bfmax-32bit-dsp.c ****     simpleserial_addcmd('d', 16, cmd_run_decoder);
+ 883              		.loc 1 213 5 view .LVU271
+ 884 0038 054A     		ldr	r2, .L62+8
+ 885 003a 1021     		movs	r1, #16
+ 886 003c 6420     		movs	r0, #100
+ 887 003e FFF7FEFF 		bl	simpleserial_addcmd
+ 888              	.LVL77:
+ 889              	.L60:
+ 214:simpleserial-bfmax-32bit-dsp.c **** 
+ 215:simpleserial-bfmax-32bit-dsp.c ****     while(1) {
+ 890              		.loc 1 215 5 view .LVU272
+ 216:simpleserial-bfmax-32bit-dsp.c ****         simpleserial_get();
+ 891              		.loc 1 216 9 discriminator 1 view .LVU273
+ 892 0042 FFF7FEFF 		bl	simpleserial_get
+ 893              	.LVL78:
+ 215:simpleserial-bfmax-32bit-dsp.c ****         simpleserial_get();
+ 894              		.loc 1 215 10 view .LVU274
+ 895 0046 FCE7     		b	.L60
+ 896              	.L63:
+ 897              		.align	2
+ 898              	.L62:
+ 899 0048 00000000 		.word	cmd_profile_argmax
+ 900 004c 00000000 		.word	cmd_set_key
+ 901 0050 00000000 		.word	cmd_run_decoder
+ 902              		.cfi_endproc
+ 903              	.LFE128:
+ 905              		.bss
+ 906              		.align	2
+ 907              		.set	.LANCHOR0,. + 0
+ 910              	Htr_sparse:
+ 911 0000 00000000 		.space	60
+ 911      00000000 
+ 911      00000000 
+ 911      00000000 
+ 911      00000000 
+ 914              	upc:
+ 915 003c 00000000 		.space	1024
+ 915      00000000 
+ 915      00000000 
+ 915      00000000 
+ 915      00000000 
+ 918              	syndrome_bits:
+ 919 043c 00000000 		.space	512
+ 919      00000000 
+ 919      00000000 
+ 919      00000000 
+ 919      00000000 
+ 920              		.text
+ 921              	.Letext0:
+ 922              		.file 3 "/usr/lib/gcc/arm-none-eabi/14.2.1/include/stdint.h"
+ 923              		.file 4 ".././simpleserial/simpleserial.h"
+ 924              		.file 5 ".././hal/stm32f3/stm32f3_hal.h"
+ 925              		.file 6 ".././hal/hal.h"
+DEFINED SYMBOLS
+                            *ABS*:00000000 simpleserial-bfmax-32bit-dsp.c
+     /tmp/ccRX8mki.s:19     .text.cmd_set_key:00000000 $t
+     /tmp/ccRX8mki.s:26     .text.cmd_set_key:00000000 cmd_set_key
+     /tmp/ccRX8mki.s:100    .text.cmd_set_key:0000003c $d
+     /tmp/ccRX8mki.s:106    .text.argmax_u8_vulnerable:00000000 $t
+     /tmp/ccRX8mki.s:113    .text.argmax_u8_vulnerable:00000000 argmax_u8_vulnerable
+     /tmp/ccRX8mki.s:390    .text.cmd_profile_argmax:00000000 $t
+     /tmp/ccRX8mki.s:397    .text.cmd_profile_argmax:00000000 cmd_profile_argmax
+     /tmp/ccRX8mki.s:527    .text.cmd_profile_argmax:00000080 $d
+     /tmp/ccRX8mki.s:534    .text.update_sparse_vulnerable:00000000 $t
+     /tmp/ccRX8mki.s:541    .text.update_sparse_vulnerable:00000000 update_sparse_vulnerable
+     /tmp/ccRX8mki.s:648    .text.update_sparse_vulnerable:0000006c $d
+     /tmp/ccRX8mki.s:653    .text.cmd_run_decoder:00000000 $t
+     /tmp/ccRX8mki.s:660    .text.cmd_run_decoder:00000000 cmd_run_decoder
+     /tmp/ccRX8mki.s:817    .text.cmd_run_decoder:00000098 $d
+     /tmp/ccRX8mki.s:825    .text.startup.main:00000000 $t
+     /tmp/ccRX8mki.s:832    .text.startup.main:00000000 main
+     /tmp/ccRX8mki.s:899    .text.startup.main:00000048 $d
+     /tmp/ccRX8mki.s:906    .bss:00000000 $d
+     /tmp/ccRX8mki.s:910    .bss:00000000 Htr_sparse
+     /tmp/ccRX8mki.s:914    .bss:0000003c upc
+     /tmp/ccRX8mki.s:918    .bss:0000043c syndrome_bits
+
+UNDEFINED SYMBOLS
+trigger_high
+trigger_low
+simpleserial_put
+platform_init
+init_uart
+trigger_setup
+simpleserial_init
+simpleserial_addcmd
+simpleserial_get

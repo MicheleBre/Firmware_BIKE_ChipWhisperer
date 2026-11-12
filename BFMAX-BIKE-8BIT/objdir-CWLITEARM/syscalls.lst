@@ -1,0 +1,235 @@
+   1              		.cpu cortex-m4
+   2              		.arch armv7e-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 2
+  11              		.eabi_attribute 34, 1
+  12              		.eabi_attribute 18, 4
+  13              		.file	"syscalls.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "syscalls.c"
+  18              		.section	.text._close,"ax",%progbits
+  19              		.align	1
+  20              		.p2align 2,,3
+  21              		.global	_close
+  22              		.syntax unified
+  23              		.thumb
+  24              		.thumb_func
+  26              	_close:
+  27              	.LVL0:
+  28              	.LFB0:
+   1:syscalls.c    **** #include <sys/stat.h>
+   2:syscalls.c    **** #include <errno.h>
+   3:syscalls.c    **** 
+   4:syscalls.c    **** #undef errno
+   5:syscalls.c    **** extern int errno;
+   6:syscalls.c    **** 
+   7:syscalls.c    **** int _close(int file) {
+  29              		.loc 1 7 22 view -0
+  30              		.cfi_startproc
+  31              		@ args = 0, pretend = 0, frame = 0
+  32              		@ frame_needed = 0, uses_anonymous_args = 0
+  33              		@ link register save eliminated.
+   8:syscalls.c    ****     (void)file;
+  34              		.loc 1 8 5 view .LVU1
+   9:syscalls.c    ****     return -1;
+  35              		.loc 1 9 5 view .LVU2
+  10:syscalls.c    **** }
+  36              		.loc 1 10 1 is_stmt 0 view .LVU3
+  37 0000 4FF0FF30 		mov	r0, #-1
+  38              	.LVL1:
+  39              		.loc 1 10 1 view .LVU4
+  40 0004 7047     		bx	lr
+  41              		.cfi_endproc
+  42              	.LFE0:
+  44 0006 00BF     		.section	.text._fstat,"ax",%progbits
+  45              		.align	1
+  46              		.p2align 2,,3
+  47              		.global	_fstat
+  48              		.syntax unified
+  49              		.thumb
+  50              		.thumb_func
+  52              	_fstat:
+  53              	.LVL2:
+  54              	.LFB1:
+  11:syscalls.c    **** 
+  12:syscalls.c    **** int _fstat(int file, struct stat *st) {
+  55              		.loc 1 12 39 is_stmt 1 view -0
+  56              		.cfi_startproc
+  57              		@ args = 0, pretend = 0, frame = 0
+  58              		@ frame_needed = 0, uses_anonymous_args = 0
+  59              		@ link register save eliminated.
+  13:syscalls.c    ****     (void)file;
+  60              		.loc 1 13 5 view .LVU6
+  14:syscalls.c    ****     st->st_mode = S_IFCHR;
+  61              		.loc 1 14 5 view .LVU7
+  62              		.loc 1 14 17 is_stmt 0 view .LVU8
+  63 0000 4FF40053 		mov	r3, #8192
+  64 0004 4B60     		str	r3, [r1, #4]
+  15:syscalls.c    ****     return 0;
+  65              		.loc 1 15 5 is_stmt 1 view .LVU9
+  16:syscalls.c    **** }
+  66              		.loc 1 16 1 is_stmt 0 view .LVU10
+  67 0006 0020     		movs	r0, #0
+  68              	.LVL3:
+  69              		.loc 1 16 1 view .LVU11
+  70 0008 7047     		bx	lr
+  71              		.cfi_endproc
+  72              	.LFE1:
+  74 000a 00BF     		.section	.text._isatty,"ax",%progbits
+  75              		.align	1
+  76              		.p2align 2,,3
+  77              		.global	_isatty
+  78              		.syntax unified
+  79              		.thumb
+  80              		.thumb_func
+  82              	_isatty:
+  83              	.LVL4:
+  84              	.LFB2:
+  17:syscalls.c    **** 
+  18:syscalls.c    **** int _isatty(int file) {
+  85              		.loc 1 18 23 is_stmt 1 view -0
+  86              		.cfi_startproc
+  87              		@ args = 0, pretend = 0, frame = 0
+  88              		@ frame_needed = 0, uses_anonymous_args = 0
+  89              		@ link register save eliminated.
+  19:syscalls.c    ****     (void)file;
+  90              		.loc 1 19 5 view .LVU13
+  20:syscalls.c    ****     return 1;
+  91              		.loc 1 20 5 view .LVU14
+  21:syscalls.c    **** }
+  92              		.loc 1 21 1 is_stmt 0 view .LVU15
+  93 0000 0120     		movs	r0, #1
+  94              	.LVL5:
+  95              		.loc 1 21 1 view .LVU16
+  96 0002 7047     		bx	lr
+  97              		.cfi_endproc
+  98              	.LFE2:
+ 100              		.section	.text._lseek,"ax",%progbits
+ 101              		.align	1
+ 102              		.p2align 2,,3
+ 103              		.global	_lseek
+ 104              		.syntax unified
+ 105              		.thumb
+ 106              		.thumb_func
+ 108              	_lseek:
+ 109              	.LVL6:
+ 110              	.LFB3:
+  22:syscalls.c    **** 
+  23:syscalls.c    **** int _lseek(int file, int ptr, int dir) {
+ 111              		.loc 1 23 40 is_stmt 1 view -0
+ 112              		.cfi_startproc
+ 113              		@ args = 0, pretend = 0, frame = 0
+ 114              		@ frame_needed = 0, uses_anonymous_args = 0
+ 115              		@ link register save eliminated.
+  24:syscalls.c    ****     (void)file;
+ 116              		.loc 1 24 5 view .LVU18
+  25:syscalls.c    ****     (void)ptr;
+ 117              		.loc 1 25 5 view .LVU19
+  26:syscalls.c    ****     (void)dir;
+ 118              		.loc 1 26 5 view .LVU20
+  27:syscalls.c    ****     return 0;
+ 119              		.loc 1 27 5 view .LVU21
+  28:syscalls.c    **** }
+ 120              		.loc 1 28 1 is_stmt 0 view .LVU22
+ 121 0000 0020     		movs	r0, #0
+ 122              	.LVL7:
+ 123              		.loc 1 28 1 view .LVU23
+ 124 0002 7047     		bx	lr
+ 125              		.cfi_endproc
+ 126              	.LFE3:
+ 128              		.section	.text._read,"ax",%progbits
+ 129              		.align	1
+ 130              		.p2align 2,,3
+ 131              		.global	_read
+ 132              		.syntax unified
+ 133              		.thumb
+ 134              		.thumb_func
+ 136              	_read:
+ 137              	.LVL8:
+ 138              	.LFB4:
+  29:syscalls.c    **** 
+  30:syscalls.c    **** int _read(int file, char *ptr, int len) {
+ 139              		.loc 1 30 41 is_stmt 1 view -0
+ 140              		.cfi_startproc
+ 141              		@ args = 0, pretend = 0, frame = 0
+ 142              		@ frame_needed = 0, uses_anonymous_args = 0
+ 143              		@ link register save eliminated.
+  31:syscalls.c    ****     (void)file;
+ 144              		.loc 1 31 5 view .LVU25
+  32:syscalls.c    ****     (void)ptr;
+ 145              		.loc 1 32 5 view .LVU26
+  33:syscalls.c    ****     (void)len;
+ 146              		.loc 1 33 5 view .LVU27
+  34:syscalls.c    ****     return 0;
+ 147              		.loc 1 34 5 view .LVU28
+  35:syscalls.c    **** }
+ 148              		.loc 1 35 1 is_stmt 0 view .LVU29
+ 149 0000 0020     		movs	r0, #0
+ 150              	.LVL9:
+ 151              		.loc 1 35 1 view .LVU30
+ 152 0002 7047     		bx	lr
+ 153              		.cfi_endproc
+ 154              	.LFE4:
+ 156              		.section	.text._write,"ax",%progbits
+ 157              		.align	1
+ 158              		.p2align 2,,3
+ 159              		.global	_write
+ 160              		.syntax unified
+ 161              		.thumb
+ 162              		.thumb_func
+ 164              	_write:
+ 165              	.LVL10:
+ 166              	.LFB5:
+  36:syscalls.c    **** 
+  37:syscalls.c    **** int _write(int file, char *ptr, int len) {
+ 167              		.loc 1 37 42 is_stmt 1 view -0
+ 168              		.cfi_startproc
+ 169              		@ args = 0, pretend = 0, frame = 0
+ 170              		@ frame_needed = 0, uses_anonymous_args = 0
+ 171              		@ link register save eliminated.
+  38:syscalls.c    ****     (void)file;
+ 172              		.loc 1 38 5 view .LVU32
+  39:syscalls.c    ****     (void)ptr;
+ 173              		.loc 1 39 5 view .LVU33
+  40:syscalls.c    ****     return len;
+ 174              		.loc 1 40 5 view .LVU34
+  41:syscalls.c    **** }...
+ 175              		.loc 1 41 1 is_stmt 0 view .LVU35
+ 176 0000 1046     		mov	r0, r2
+ 177              	.LVL11:
+ 178              		.loc 1 41 1 view .LVU36
+ 179 0002 7047     		bx	lr
+ 180              		.cfi_endproc
+ 181              	.LFE5:
+ 183              		.text
+ 184              	.Letext0:
+ 185              		.file 2 "/usr/include/newlib/machine/_default_types.h"
+ 186              		.file 3 "/usr/include/newlib/sys/_types.h"
+ 187              		.file 4 "/usr/include/newlib/sys/_timeval.h"
+ 188              		.file 5 "/usr/include/newlib/sys/_timespec.h"
+ 189              		.file 6 "/usr/include/newlib/sys/types.h"
+ 190              		.file 7 "/usr/include/newlib/sys/stat.h"
+DEFINED SYMBOLS
+                            *ABS*:00000000 syscalls.c
+     /tmp/cc9DeJMS.s:19     .text._close:00000000 $t
+     /tmp/cc9DeJMS.s:26     .text._close:00000000 _close
+     /tmp/cc9DeJMS.s:45     .text._fstat:00000000 $t
+     /tmp/cc9DeJMS.s:52     .text._fstat:00000000 _fstat
+     /tmp/cc9DeJMS.s:75     .text._isatty:00000000 $t
+     /tmp/cc9DeJMS.s:82     .text._isatty:00000000 _isatty
+     /tmp/cc9DeJMS.s:101    .text._lseek:00000000 $t
+     /tmp/cc9DeJMS.s:108    .text._lseek:00000000 _lseek
+     /tmp/cc9DeJMS.s:129    .text._read:00000000 $t
+     /tmp/cc9DeJMS.s:136    .text._read:00000000 _read
+     /tmp/cc9DeJMS.s:157    .text._write:00000000 $t
+     /tmp/cc9DeJMS.s:164    .text._write:00000000 _write
+
+NO UNDEFINED SYMBOLS

@@ -1,0 +1,1817 @@
+   1               		.file	"simpleserial-bfmax-maskered-8bit.c"
+   2               	__SP_H__ = 0x3e
+   3               	__SP_L__ = 0x3d
+   4               	__SREG__ = 0x3f
+   5               	__RAMPZ__ = 0x3b
+   6               	__CCP__ = 0x34
+   7               	__tmp_reg__ = 0
+   8               	__zero_reg__ = 1
+   9               		.text
+  10               	.Ltext0:
+  11               		.cfi_sections	.debug_frame
+  12               		.file 1 "simpleserial-bfmax-maskered-8bit.c"
+  13               	.global	cmd_set_key
+  15               	cmd_set_key:
+  16               	.LVL0:
+  17               	.LFB68:
+   1:simpleserial-bfmax-maskered-8bit.c **** #include "hal.h"
+   2:simpleserial-bfmax-maskered-8bit.c **** #include "simpleserial.h"
+   3:simpleserial-bfmax-maskered-8bit.c **** #include <stdint.h>
+   4:simpleserial-bfmax-maskered-8bit.c **** #include <stdlib.h>
+   5:simpleserial-bfmax-maskered-8bit.c **** #include <string.h>
+   6:simpleserial-bfmax-maskered-8bit.c **** 
+   7:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+   8:simpleserial-bfmax-maskered-8bit.c ****  * PARAMETRI CRITTOGRAFICI SCALATI PER SRAM MICROCONTROLLORE (CW-Lite)
+   9:simpleserial-bfmax-maskered-8bit.c ****  * Adatta R_BITS in base alla RAM disponibile (es. 512 per XMEGA, 4096 per STM32)
+  10:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+  11:simpleserial-bfmax-maskered-8bit.c **** #define N0 2
+  12:simpleserial-bfmax-maskered-8bit.c **** #define R_BITS 521
+  13:simpleserial-bfmax-maskered-8bit.c **** #define N_BITS (N0 * R_BITS)
+  14:simpleserial-bfmax-maskered-8bit.c **** #define D_WEIGHT 15          /* Peso della riga sparsa segreta (supp(h)) */
+  15:simpleserial-bfmax-maskered-8bit.c **** #define ITER_MAX_BFMAX 20    /* Numero massimo di iterazioni del decoder */
+  16:simpleserial-bfmax-maskered-8bit.c **** 
+  17:simpleserial-bfmax-maskered-8bit.c **** typedef uint16_t POS_T;
+  18:simpleserial-bfmax-maskered-8bit.c **** 
+  19:simpleserial-bfmax-maskered-8bit.c **** /* Strutture dati del decoder e della chiave segreta (stile LEDA/BIKE KEM-CPA) */
+  20:simpleserial-bfmax-maskered-8bit.c **** static uint8_t upc[N_BITS];
+  21:simpleserial-bfmax-maskered-8bit.c **** static uint8_t syndrome_bits[R_BITS];
+  22:simpleserial-bfmax-maskered-8bit.c **** static POS_T Htr_sparse[N0][D_WEIGHT];
+  23:simpleserial-bfmax-maskered-8bit.c **** 
+  24:simpleserial-bfmax-maskered-8bit.c **** 
+  25:simpleserial-bfmax-maskered-8bit.c **** 
+  26:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+  27:simpleserial-bfmax-maskered-8bit.c ****  * FUNZIONE 1 OTTIMIZZATA: argmax_u8
+  28:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+  29:simpleserial-bfmax-maskered-8bit.c **** POS_T __attribute__((noinline)) argmax_u8_vulnerable(const uint8_t *arr, uint16_t len) {
+  30:simpleserial-bfmax-maskered-8bit.c ****     uint8_t max_val = 0;
+  31:simpleserial-bfmax-maskered-8bit.c **** 
+  32:simpleserial-bfmax-maskered-8bit.c ****     /* Passo 1: Ricerca del valore massimo assoluto (tempo costante su tutta la lunghezza) */
+  33:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < len; i++) {
+  34:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t is_greater = (uint8_t)((max_val - arr[i]) >> 7); 
+  36:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+  37:simpleserial-bfmax-maskered-8bit.c ****         
+  38:simpleserial-bfmax-maskered-8bit.c ****         max_val = (max_val & ~mask) | (arr[i] & mask);
+  39:simpleserial-bfmax-maskered-8bit.c ****     }
+  40:simpleserial-bfmax-maskered-8bit.c **** 
+  41:simpleserial-bfmax-maskered-8bit.c ****     //Variabile di salvataggio del massimo
+  42:simpleserial-bfmax-maskered-8bit.c ****     POS_T max_col = 0;
+  43:simpleserial-bfmax-maskered-8bit.c ****     POS_T found_flag = 0; // Flag per indicare se il massimo è stato trovato, serve per ignorare t
+  44:simpleserial-bfmax-maskered-8bit.c **** 
+  45:simpleserial-bfmax-maskered-8bit.c ****     /* Passo 2: Ricerca della prima posizione 'col' corrispondente a max_val.
+  46:simpleserial-bfmax-maskered-8bit.c ****     Optimized: salvataggio massimo e maschera per il branchless */
+  47:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < len; i++) {
+  48:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+  49:simpleserial-bfmax-maskered-8bit.c ****         uint8_t diff = arr[i] ^ max_val;
+  50:simpleserial-bfmax-maskered-8bit.c **** 
+  51:simpleserial-bfmax-maskered-8bit.c ****         /* is_equal = 1 se arr[i] == max_val, altrimenti 0 */
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_not_equal = ((uint16_t)(diff | (uint8_t)(-diff)) >> 7) & 1;
+  53:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+  54:simpleserial-bfmax-maskered-8bit.c **** 
+  55:simpleserial-bfmax-maskered-8bit.c ****         /* Condizione attiva SOLO se è uguale E non è ancora stato trovato (found_flag == 0) */
+  56:simpleserial-bfmax-maskered-8bit.c ****         uint16_t take_this = is_equal & (1 - found_flag);
+  57:simpleserial-bfmax-maskered-8bit.c **** 
+  58:simpleserial-bfmax-maskered-8bit.c ****         /* Espande take_this in maschera a 16 bit:
+  59:simpleserial-bfmax-maskered-8bit.c ****          * take_this == 1 -> 0xFFFF
+  60:simpleserial-bfmax-maskered-8bit.c ****          * take_this == 0 -> 0x0000 */
+  61:simpleserial-bfmax-maskered-8bit.c ****         uint16_t mask = (uint16_t)(-(int16_t)take_this);
+  62:simpleserial-bfmax-maskered-8bit.c **** 
+  63:simpleserial-bfmax-maskered-8bit.c ****         /* Selezione multiplexer bitwise:
+  64:simpleserial-bfmax-maskered-8bit.c ****          * se mask == 0xFFFF -> col_found assume 'i'
+  65:simpleserial-bfmax-maskered-8bit.c ****          * se mask == 0x0000 -> col_found resta invariato */
+  66:simpleserial-bfmax-maskered-8bit.c ****         max_col = (max_col & ~mask) | (i & mask);
+  67:simpleserial-bfmax-maskered-8bit.c **** 
+  68:simpleserial-bfmax-maskered-8bit.c ****         /* Aggiorna il flag: una volta a 1, resta 1 fino alla fine del ciclo */
+  69:simpleserial-bfmax-maskered-8bit.c ****         found_flag |= is_equal;
+  70:simpleserial-bfmax-maskered-8bit.c ****     }
+  71:simpleserial-bfmax-maskered-8bit.c **** 
+  72:simpleserial-bfmax-maskered-8bit.c ****     return max_col;
+  73:simpleserial-bfmax-maskered-8bit.c **** }
+  74:simpleserial-bfmax-maskered-8bit.c **** 
+  75:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+  76:simpleserial-bfmax-maskered-8bit.c ****  * FUNZIONE VULNERABILE 2: update_syndrome_and_upcs
+  77:simpleserial-bfmax-maskered-8bit.c ****  * Contiene l'indirizzamento di memoria dipendente dal segreto Htr_sparse.
+  78:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+  79:simpleserial-bfmax-maskered-8bit.c **** void __attribute__((noinline)) update_sparse_vulnerable(POS_T col) {
+  80:simpleserial-bfmax-maskered-8bit.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+  81:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+  82:simpleserial-bfmax-maskered-8bit.c **** 
+  83:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t k = 0; k < D_WEIGHT; k++) {
+  84:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+  85:simpleserial-bfmax-maskered-8bit.c ****          * row = (Htr_sparse[block][k] + col_bit) mod R_BITS */
+  86:simpleserial-bfmax-maskered-8bit.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+  87:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+  88:simpleserial-bfmax-maskered-8bit.c ****             row -= R_BITS;
+  89:simpleserial-bfmax-maskered-8bit.c ****         }
+  90:simpleserial-bfmax-maskered-8bit.c **** 
+  91:simpleserial-bfmax-maskered-8bit.c ****         /* Flip del bit di sindrome e aggiornamento contatore UPC.
+  92:simpleserial-bfmax-maskered-8bit.c ****          * VULNERABILITA': L'indirizzo toccato dipende da Htr_sparse! */
+  93:simpleserial-bfmax-maskered-8bit.c ****         syndrome_bits[row] ^= 1;
+  94:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+  95:simpleserial-bfmax-maskered-8bit.c **** 
+  96:simpleserial-bfmax-maskered-8bit.c ****         upc[row] = (uint8_t)(upc[row] + delta);
+  97:simpleserial-bfmax-maskered-8bit.c ****     }
+  98:simpleserial-bfmax-maskered-8bit.c **** }
+  99:simpleserial-bfmax-maskered-8bit.c **** 
+ 100:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+ 101:simpleserial-bfmax-maskered-8bit.c ****  * COMANDO SIMPLESERIAL 'p': Profiling diretto del Timing Leak di argmax_u8
+ 102:simpleserial-bfmax-maskered-8bit.c ****  * (§5.2 Fase 1 del PDF: riceve la posizione target p = (p_high << 8) | p_low,
+ 103:simpleserial-bfmax-maskered-8bit.c ****  * posiziona il massimo esattamente in 'p' e misura la finestra con il trigger)
+ 104:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+ 105:simpleserial-bfmax-maskered-8bit.c **** uint8_t cmd_profile_argmax(uint8_t* pt, uint8_t len) {
+ 106:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 107:simpleserial-bfmax-maskered-8bit.c **** 
+ 108:simpleserial-bfmax-maskered-8bit.c ****     /* Estrae la posizione target 'p' inviata dallo script Python ChipWhisperer */
+ 109:simpleserial-bfmax-maskered-8bit.c ****     POS_T target_pos = ((uint16_t)pt[0] << 8) | pt[1];
+ 110:simpleserial-bfmax-maskered-8bit.c ****     if (target_pos >= N_BITS) {
+ 111:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 112:simpleserial-bfmax-maskered-8bit.c ****     }
+ 113:simpleserial-bfmax-maskered-8bit.c **** 
+ 114:simpleserial-bfmax-maskered-8bit.c ****     /* Prepara l'array UPC con rumore di fondo basso e il picco massimo in target_pos */
+ 115:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 116:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 117:simpleserial-bfmax-maskered-8bit.c ****     }
+ 118:simpleserial-bfmax-maskered-8bit.c ****     upc[target_pos] = 15; /* Massimo unico garantito in posizione target_pos */
+ 119:simpleserial-bfmax-maskered-8bit.c **** 
+ 120:simpleserial-bfmax-maskered-8bit.c ****     /* --- INIZIO FINESTRA DI MISURA (Trigger Alto) --- */
+ 121:simpleserial-bfmax-maskered-8bit.c ****     trigger_high();
+ 122:simpleserial-bfmax-maskered-8bit.c ****     volatile POS_T found_col = argmax_u8_vulnerable(upc, N_BITS);
+ 123:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 124:simpleserial-bfmax-maskered-8bit.c ****     /* --- FINE FINESTRA DI MISURA (Trigger Basso) --- */
+ 125:simpleserial-bfmax-maskered-8bit.c **** 
+ 126:simpleserial-bfmax-maskered-8bit.c ****     /* Restituisce la posizione trovata via SimpleSerial 'r' per verifica */
+ 127:simpleserial-bfmax-maskered-8bit.c ****     uint8_t resp[2];
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[0] = (uint8_t)(found_col >> 8);
+ 129:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 130:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 131:simpleserial-bfmax-maskered-8bit.c **** 
+ 132:simpleserial-bfmax-maskered-8bit.c ****     return 0x00;
+ 133:simpleserial-bfmax-maskered-8bit.c **** }
+ 134:simpleserial-bfmax-maskered-8bit.c **** 
+ 135:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+ 136:simpleserial-bfmax-maskered-8bit.c ****  * COMANDO SIMPLESERIAL 'k': Imposta una chiave segreta sparsa Htr_sparse nota
+ 137:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+ 138:simpleserial-bfmax-maskered-8bit.c **** uint8_t cmd_set_key(uint8_t* k, uint8_t len) {
+  18               		.loc 1 138 46 view -0
+  19               		.cfi_startproc
+  20               		.loc 1 138 46 is_stmt 0 view .LVU1
+  21 0000 EF92      		push r14
+  22               	.LCFI0:
+  23               		.cfi_def_cfa_offset 4
+  24               		.cfi_offset 14, -3
+  25 0002 FF92      		push r15
+  26               	.LCFI1:
+  27               		.cfi_def_cfa_offset 5
+  28               		.cfi_offset 15, -4
+  29 0004 0F93      		push r16
+  30               	.LCFI2:
+  31               		.cfi_def_cfa_offset 6
+  32               		.cfi_offset 16, -5
+  33 0006 1F93      		push r17
+  34               	.LCFI3:
+  35               		.cfi_def_cfa_offset 7
+  36               		.cfi_offset 17, -6
+  37 0008 CF93      		push r28
+  38               	.LCFI4:
+  39               		.cfi_def_cfa_offset 8
+  40               		.cfi_offset 28, -7
+  41 000a DF93      		push r29
+  42               	.LCFI5:
+  43               		.cfi_def_cfa_offset 9
+  44               		.cfi_offset 29, -8
+  45               	/* prologue: function */
+  46               	/* frame size = 0 */
+  47               	/* stack size = 6 */
+  48               	.L__stack_usage = 6
+  49 000c FC01      		movw r30,r24
+ 139:simpleserial-bfmax-maskered-8bit.c ****     /* Popola il supporto della chiave segreta in modo deterministico dal seme k[0] */
+ 140:simpleserial-bfmax-maskered-8bit.c ****     uint8_t seed = (len > 0) ? k[0] : 0x42;
+  50               		.loc 1 140 5 is_stmt 1 view .LVU2
+  51 000e 22E4      		ldi r18,lo8(66)
+  52 0010 30E0      		ldi r19,0
+  53               		.loc 1 140 13 is_stmt 0 view .LVU3
+  54 0012 6115      		cp r22, __zero_reg__
+  55 0014 01F0      		breq .L2
+  56               	.LBB2:
+  57               	.LBB3:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 142:simpleserial-bfmax-maskered-8bit.c ****         for (uint8_t j = 0; j < D_WEIGHT; j++) {
+ 143:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  58               		.loc 1 143 50 view .LVU4
+  59 0016 2081      		ld r18,Z
+  60 0018 30E0      		ldi r19,0
+  61               	.L2:
+  62               	.LBE3:
+  63               	.LBE2:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+  64               		.loc 1 141 5 is_stmt 1 view .LVU5
+  65               	.LBB6:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+  66               		.loc 1 141 10 view .LVU6
+  67               	.LVL1:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+  68               		.loc 1 141 27 discriminator 1 view .LVU7
+  69               	.LBB4:
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  70               		.loc 1 142 31 discriminator 1 view .LVU8
+  71 001a E901      		movw r28,r18
+  72 001c 80E0      		ldi r24,lo8(Htr_sparse+30)
+  73 001e E82E      		mov r14,r24
+  74 0020 80E0      		ldi r24,hi8(Htr_sparse+30)
+  75 0022 F82E      		mov r15,r24
+  76               	.LVL2:
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  77               		.loc 1 142 31 is_stmt 0 discriminator 1 view .LVU9
+  78               	.LBE4:
+  79               	.LBE6:
+  80 0024 E0E0      		ldi r30,lo8(Htr_sparse)
+  81 0026 F0E0      		ldi r31,hi8(Htr_sparse)
+  82               	.LVL3:
+  83               	.LBB7:
+  84               	.LBB5:
+  85               		.loc 1 143 69 view .LVU10
+  86 0028 09E0      		ldi r16,lo8(9)
+  87 002a 12E0      		ldi r17,lo8(2)
+  88               	.LVL4:
+  89               	.L3:
+  90               		.loc 1 143 13 is_stmt 1 view .LVU11
+  91               		.loc 1 143 69 is_stmt 0 view .LVU12
+  92 002c CE01      		movw r24,r28
+  93 002e B801      		movw r22,r16
+  94 0030 0E94 0000 		call __divmodhi4
+  95               		.loc 1 143 30 view .LVU13
+  96 0034 8193      		st Z+,r24
+  97 0036 9193      		st Z+,r25
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  98               		.loc 1 142 44 is_stmt 1 discriminator 3 view .LVU14
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  99               		.loc 1 142 31 discriminator 1 view .LVU15
+ 100 0038 6F96      		adiw r28,31
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+ 101               		.loc 1 142 31 is_stmt 0 discriminator 1 view .LVU16
+ 102 003a EE16      		cp r14,r30
+ 103 003c FF06      		cpc r15,r31
+ 104 003e 01F4      		brne .L3
+ 105 0040 2F5E      		subi r18,-17
+ 106 0042 3F4F      		sbci r19,-1
+ 107 0044 E0E0      		ldi r30,lo8(Htr_sparse+30)
+ 108 0046 F0E0      		ldi r31,hi8(Htr_sparse+30)
+ 109 0048 00E0      		ldi r16,lo8(Htr_sparse+60)
+ 110 004a 10E0      		ldi r17,hi8(Htr_sparse+60)
+ 111               		.loc 1 143 69 view .LVU17
+ 112 004c C9E0      		ldi r28,lo8(9)
+ 113 004e D2E0      		ldi r29,lo8(2)
+ 114               	.LVL5:
+ 115               	.L4:
+ 116               		.loc 1 143 13 is_stmt 1 view .LVU18
+ 117               		.loc 1 143 69 is_stmt 0 view .LVU19
+ 118 0050 C901      		movw r24,r18
+ 119 0052 BE01      		movw r22,r28
+ 120 0054 0E94 0000 		call __divmodhi4
+ 121               		.loc 1 143 30 view .LVU20
+ 122 0058 8193      		st Z+,r24
+ 123 005a 9193      		st Z+,r25
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+ 124               		.loc 1 142 44 is_stmt 1 discriminator 3 view .LVU21
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+ 125               		.loc 1 142 31 discriminator 1 view .LVU22
+ 126 005c 215E      		subi r18,-31
+ 127 005e 3F4F      		sbci r19,-1
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+ 128               		.loc 1 142 31 is_stmt 0 discriminator 1 view .LVU23
+ 129 0060 0E17      		cp r16,r30
+ 130 0062 1F07      		cpc r17,r31
+ 131 0064 01F4      		brne .L4
+ 132               	.LBE5:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 133               		.loc 1 141 34 is_stmt 1 discriminator 2 view .LVU24
+ 134               	.LVL6:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 135               		.loc 1 141 27 discriminator 1 view .LVU25
+ 136               	.LBE7:
+ 144:simpleserial-bfmax-maskered-8bit.c ****         }
+ 145:simpleserial-bfmax-maskered-8bit.c ****     }
+ 146:simpleserial-bfmax-maskered-8bit.c ****     return 0x00;
+ 137               		.loc 1 146 5 view .LVU26
+ 147:simpleserial-bfmax-maskered-8bit.c **** }
+ 138               		.loc 1 147 1 is_stmt 0 view .LVU27
+ 139 0066 80E0      		ldi r24,0
+ 140               	/* epilogue start */
+ 141 0068 DF91      		pop r29
+ 142 006a CF91      		pop r28
+ 143 006c 1F91      		pop r17
+ 144 006e 0F91      		pop r16
+ 145 0070 FF90      		pop r15
+ 146 0072 EF90      		pop r14
+ 147 0074 0895      		ret
+ 148               		.cfi_endproc
+ 149               	.LFE68:
+ 151               	.global	argmax_u8_vulnerable
+ 153               	argmax_u8_vulnerable:
+ 154               	.LVL7:
+ 155               	.LFB65:
+  29:simpleserial-bfmax-maskered-8bit.c ****     uint8_t max_val = 0;
+ 156               		.loc 1 29 88 is_stmt 1 view -0
+ 157               		.cfi_startproc
+  29:simpleserial-bfmax-maskered-8bit.c ****     uint8_t max_val = 0;
+ 158               		.loc 1 29 88 is_stmt 0 view .LVU29
+ 159 0076 DF92      		push r13
+ 160               	.LCFI6:
+ 161               		.cfi_def_cfa_offset 4
+ 162               		.cfi_offset 13, -3
+ 163 0078 EF92      		push r14
+ 164               	.LCFI7:
+ 165               		.cfi_def_cfa_offset 5
+ 166               		.cfi_offset 14, -4
+ 167 007a FF92      		push r15
+ 168               	.LCFI8:
+ 169               		.cfi_def_cfa_offset 6
+ 170               		.cfi_offset 15, -5
+ 171 007c 0F93      		push r16
+ 172               	.LCFI9:
+ 173               		.cfi_def_cfa_offset 7
+ 174               		.cfi_offset 16, -6
+ 175 007e 1F93      		push r17
+ 176               	.LCFI10:
+ 177               		.cfi_def_cfa_offset 8
+ 178               		.cfi_offset 17, -7
+ 179 0080 CF93      		push r28
+ 180               	.LCFI11:
+ 181               		.cfi_def_cfa_offset 9
+ 182               		.cfi_offset 28, -8
+ 183 0082 DF93      		push r29
+ 184               	.LCFI12:
+ 185               		.cfi_def_cfa_offset 10
+ 186               		.cfi_offset 29, -9
+ 187               	/* prologue: function */
+ 188               	/* frame size = 0 */
+ 189               	/* stack size = 7 */
+ 190               	.L__stack_usage = 7
+ 191 0084 DB01      		movw r26,r22
+  30:simpleserial-bfmax-maskered-8bit.c **** 
+ 192               		.loc 1 30 5 is_stmt 1 view .LVU30
+ 193               	.LVL8:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 194               		.loc 1 33 5 view .LVU31
+ 195               	.LBB8:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 196               		.loc 1 33 10 view .LVU32
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 197               		.loc 1 33 28 discriminator 1 view .LVU33
+ 198 0086 1097      		sbiw r26,0
+ 199 0088 01F4      		brne .+2
+ 200 008a 00C0      		rjmp .L13
+ 201 008c FC01      		movw r30,r24
+ 202 008e AC01      		movw r20,r24
+ 203 0090 460F      		add r20,r22
+ 204 0092 571F      		adc r21,r23
+ 205 0094 EC01      		movw r28,r24
+ 206               	.LBE8:
+  30:simpleserial-bfmax-maskered-8bit.c **** 
+ 207               		.loc 1 30 13 is_stmt 0 view .LVU34
+ 208 0096 10E0      		ldi r17,0
+ 209               	.LVL9:
+ 210               	.L11:
+ 211               	.LBB10:
+ 212               	.LBB9:
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 213               		.loc 1 35 9 is_stmt 1 view .LVU35
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 214               		.loc 1 35 54 is_stmt 0 view .LVU36
+ 215 0098 2991      		ld r18,Y+
+ 216               	.LVL10:
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 217               		.loc 1 35 49 view .LVU37
+ 218 009a 612F      		mov r22,r17
+ 219 009c 621B      		sub r22,r18
+ 220 009e 770B      		sbc r23,r23
+ 221 00a0 CB01      		movw r24,r22
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 222               		.loc 1 35 59 view .LVU38
+ 223 00a2 880F      		lsl r24
+ 224 00a4 892F      		mov r24,r25
+ 225 00a6 881F      		rol r24
+ 226 00a8 990B      		sbc r25,r25
+ 227               	.LVL11:
+  36:simpleserial-bfmax-maskered-8bit.c ****         
+ 228               		.loc 1 36 9 is_stmt 1 view .LVU39
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 229               		.loc 1 38 9 view .LVU40
+  36:simpleserial-bfmax-maskered-8bit.c ****         
+ 230               		.loc 1 36 17 is_stmt 0 view .LVU41
+ 231 00aa 982F      		mov r25,r24
+ 232 00ac 9195      		neg r25
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 233               		.loc 1 38 37 view .LVU42
+ 234 00ae 9223      		and r25,r18
+ 235 00b0 8150      		subi r24,lo8(-(-1))
+ 236               	.LVL12:
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 237               		.loc 1 38 37 view .LVU43
+ 238 00b2 8123      		and r24,r17
+ 239 00b4 192F      		mov r17,r25
+ 240               	.LVL13:
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 241               		.loc 1 38 37 view .LVU44
+ 242 00b6 182B      		or r17,r24
+ 243               	.LVL14:
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 244               		.loc 1 38 37 view .LVU45
+ 245               	.LBE9:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 246               		.loc 1 33 36 is_stmt 1 discriminator 3 view .LVU46
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 247               		.loc 1 33 28 discriminator 1 view .LVU47
+ 248 00b8 4C17      		cp r20,r28
+ 249 00ba 5D07      		cpc r21,r29
+ 250 00bc 01F4      		brne .L11
+ 251               	.LBE10:
+ 252               	.LBB11:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 253               		.loc 1 47 19 is_stmt 0 view .LVU48
+ 254 00be 60E0      		ldi r22,0
+ 255 00c0 70E0      		ldi r23,0
+ 256               	.LVL15:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 257               		.loc 1 47 19 view .LVU49
+ 258               	.LBE11:
+  43:simpleserial-bfmax-maskered-8bit.c **** 
+ 259               		.loc 1 43 11 view .LVU50
+ 260 00c2 C0E0      		ldi r28,0
+ 261 00c4 D0E0      		ldi r29,0
+ 262               	.LVL16:
+  42:simpleserial-bfmax-maskered-8bit.c ****     POS_T found_flag = 0; // Flag per indicare se il massimo è stato trovato, serve per ignorare t
+ 263               		.loc 1 42 11 view .LVU51
+ 264 00c6 80E0      		ldi r24,0
+ 265 00c8 90E0      		ldi r25,0
+ 266               	.LBB13:
+ 267               	.LBB12:
+  53:simpleserial-bfmax-maskered-8bit.c **** 
+ 268               		.loc 1 53 18 view .LVU52
+ 269 00ca DD24      		clr r13
+ 270 00cc D394      		inc r13
+ 271               	.LVL17:
+ 272               	.L12:
+  49:simpleserial-bfmax-maskered-8bit.c **** 
+ 273               		.loc 1 49 9 is_stmt 1 view .LVU53
+  49:simpleserial-bfmax-maskered-8bit.c **** 
+ 274               		.loc 1 49 27 is_stmt 0 view .LVU54
+ 275 00ce 3191      		ld r19,Z+
+  49:simpleserial-bfmax-maskered-8bit.c **** 
+ 276               		.loc 1 49 17 view .LVU55
+ 277 00d0 3127      		eor r19,r17
+ 278               	.LVL18:
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 279               		.loc 1 52 9 is_stmt 1 view .LVU56
+  53:simpleserial-bfmax-maskered-8bit.c **** 
+ 280               		.loc 1 53 9 view .LVU57
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 281               		.loc 1 52 52 is_stmt 0 view .LVU58
+ 282 00d2 232F      		mov r18,r19
+ 283 00d4 2195      		neg r18
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 284               		.loc 1 52 76 view .LVU59
+ 285 00d6 232B      		or r18,r19
+ 286 00d8 27FB      		bst r18,7
+ 287 00da 2227      		clr r18
+ 288 00dc 20F9      		bld r18,0
+  53:simpleserial-bfmax-maskered-8bit.c **** 
+ 289               		.loc 1 53 18 view .LVU60
+ 290 00de 2D25      		eor r18,r13
+ 291 00e0 30E0      		ldi r19,0
+ 292               	.LVL19:
+  56:simpleserial-bfmax-maskered-8bit.c **** 
+ 293               		.loc 1 56 9 is_stmt 1 view .LVU61
+  56:simpleserial-bfmax-maskered-8bit.c **** 
+ 294               		.loc 1 56 44 is_stmt 0 view .LVU62
+ 295 00e2 AE01      		movw r20,r28
+ 296 00e4 01E0      		ldi r16,1
+ 297 00e6 4027      		eor r20,r16
+  56:simpleserial-bfmax-maskered-8bit.c **** 
+ 298               		.loc 1 56 18 view .LVU63
+ 299 00e8 4223      		and r20,r18
+ 300 00ea 5323      		and r21,r19
+ 301               	.LVL20:
+  61:simpleserial-bfmax-maskered-8bit.c **** 
+ 302               		.loc 1 61 9 is_stmt 1 view .LVU64
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 303               		.loc 1 66 9 view .LVU65
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 304               		.loc 1 66 30 is_stmt 0 view .LVU66
+ 305 00ec 7A01      		movw r14,r20
+ 306 00ee 01E0      		ldi r16,1
+ 307 00f0 E01A      		sub r14,r16
+ 308 00f2 F108      		sbc r15,__zero_reg__
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 309               		.loc 1 66 28 view .LVU67
+ 310 00f4 8E21      		and r24,r14
+ 311               	.LVL21:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 312               		.loc 1 66 28 view .LVU68
+ 313 00f6 9F21      		and r25,r15
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 314               		.loc 1 66 42 view .LVU69
+ 315 00f8 5195      		neg r21
+ 316 00fa 4195      		neg r20
+ 317 00fc 5109      		sbc r21,__zero_reg__
+ 318               	.LVL22:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 319               		.loc 1 66 42 view .LVU70
+ 320 00fe 4623      		and r20,r22
+ 321               	.LVL23:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 322               		.loc 1 66 42 view .LVU71
+ 323 0100 5723      		and r21,r23
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 324               		.loc 1 66 17 view .LVU72
+ 325 0102 842B      		or r24,r20
+ 326 0104 952B      		or r25,r21
+ 327               	.LVL24:
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 328               		.loc 1 69 9 is_stmt 1 view .LVU73
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 329               		.loc 1 69 20 is_stmt 0 view .LVU74
+ 330 0106 C22B      		or r28,r18
+ 331               	.LVL25:
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 332               		.loc 1 69 20 view .LVU75
+ 333 0108 D32B      		or r29,r19
+ 334               	.LVL26:
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 335               		.loc 1 69 20 view .LVU76
+ 336               	.LBE12:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 337               		.loc 1 47 36 is_stmt 1 discriminator 3 view .LVU77
+ 338 010a 6F5F      		subi r22,-1
+ 339 010c 7F4F      		sbci r23,-1
+ 340               	.LVL27:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 341               		.loc 1 47 28 discriminator 1 view .LVU78
+ 342 010e A617      		cp r26,r22
+ 343 0110 B707      		cpc r27,r23
+ 344 0112 01F4      		brne .L12
+ 345               	/* epilogue start */
+ 346               	.LBE13:
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 347               		.loc 1 73 1 is_stmt 0 view .LVU79
+ 348 0114 DF91      		pop r29
+ 349 0116 CF91      		pop r28
+ 350               	.LVL28:
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 351               		.loc 1 73 1 view .LVU80
+ 352 0118 1F91      		pop r17
+ 353               	.LVL29:
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 354               		.loc 1 73 1 view .LVU81
+ 355 011a 0F91      		pop r16
+ 356 011c FF90      		pop r15
+ 357 011e EF90      		pop r14
+ 358               	.LVL30:
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 359               		.loc 1 73 1 view .LVU82
+ 360 0120 DF90      		pop r13
+ 361 0122 0895      		ret
+ 362               	.LVL31:
+ 363               	.L13:
+  42:simpleserial-bfmax-maskered-8bit.c ****     POS_T found_flag = 0; // Flag per indicare se il massimo è stato trovato, serve per ignorare t
+ 364               		.loc 1 42 11 view .LVU83
+ 365 0124 80E0      		ldi r24,0
+ 366 0126 90E0      		ldi r25,0
+ 367               	.LVL32:
+  72:simpleserial-bfmax-maskered-8bit.c **** }
+ 368               		.loc 1 72 5 is_stmt 1 view .LVU84
+ 369               	/* epilogue start */
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 370               		.loc 1 73 1 is_stmt 0 view .LVU85
+ 371 0128 DF91      		pop r29
+ 372 012a CF91      		pop r28
+ 373 012c 1F91      		pop r17
+ 374 012e 0F91      		pop r16
+ 375 0130 FF90      		pop r15
+ 376 0132 EF90      		pop r14
+ 377 0134 DF90      		pop r13
+ 378 0136 0895      		ret
+ 379               		.cfi_endproc
+ 380               	.LFE65:
+ 382               	.global	cmd_profile_argmax
+ 384               	cmd_profile_argmax:
+ 385               	.LVL33:
+ 386               	.LFB67:
+ 105:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 387               		.loc 1 105 54 is_stmt 1 view -0
+ 388               		.cfi_startproc
+ 105:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 389               		.loc 1 105 54 is_stmt 0 view .LVU87
+ 390 0138 EF92      		push r14
+ 391               	.LCFI13:
+ 392               		.cfi_def_cfa_offset 4
+ 393               		.cfi_offset 14, -3
+ 394 013a FF92      		push r15
+ 395               	.LCFI14:
+ 396               		.cfi_def_cfa_offset 5
+ 397               		.cfi_offset 15, -4
+ 398 013c 0F93      		push r16
+ 399               	.LCFI15:
+ 400               		.cfi_def_cfa_offset 6
+ 401               		.cfi_offset 16, -5
+ 402 013e 1F93      		push r17
+ 403               	.LCFI16:
+ 404               		.cfi_def_cfa_offset 7
+ 405               		.cfi_offset 17, -6
+ 406 0140 CF93      		push r28
+ 407               	.LCFI17:
+ 408               		.cfi_def_cfa_offset 8
+ 409               		.cfi_offset 28, -7
+ 410 0142 DF93      		push r29
+ 411               	.LCFI18:
+ 412               		.cfi_def_cfa_offset 9
+ 413               		.cfi_offset 29, -8
+ 414 0144 00D0      		rcall .
+ 415 0146 0F92      		push __tmp_reg__
+ 416               	.LCFI19:
+ 417               		.cfi_def_cfa_offset 13
+ 418 0148 CDB7      		in r28,__SP_L__
+ 419 014a DEB7      		in r29,__SP_H__
+ 420               	.LCFI20:
+ 421               		.cfi_def_cfa_register 28
+ 422               	/* prologue: function */
+ 423               	/* frame size = 4 */
+ 424               	/* stack size = 10 */
+ 425               	.L__stack_usage = 10
+ 426 014c FC01      		movw r30,r24
+ 106:simpleserial-bfmax-maskered-8bit.c **** 
+ 427               		.loc 1 106 5 is_stmt 1 view .LVU88
+ 106:simpleserial-bfmax-maskered-8bit.c **** 
+ 428               		.loc 1 106 25 is_stmt 0 discriminator 1 view .LVU89
+ 429 014e 81E0      		ldi r24,lo8(1)
+ 430               	.LVL34:
+ 106:simpleserial-bfmax-maskered-8bit.c **** 
+ 431               		.loc 1 106 8 view .LVU90
+ 432 0150 6230      		cpi r22,lo8(2)
+ 433 0152 00F0      		brlo .L16
+ 109:simpleserial-bfmax-maskered-8bit.c ****     if (target_pos >= N_BITS) {
+ 434               		.loc 1 109 5 is_stmt 1 view .LVU91
+ 435               	.LVL35:
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 436               		.loc 1 110 5 view .LVU92
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 437               		.loc 1 110 8 is_stmt 0 view .LVU93
+ 438 0154 E080      		ld r14,Z
+ 439 0156 F180      		ldd r15,Z+1
+ 440 0158 FE24      		eor r15,r14
+ 441 015a EF24      		eor r14,r15
+ 442 015c FE24      		eor r15,r14
+ 443 015e 82E1      		ldi r24,18
+ 444 0160 E816      		cp r14,r24
+ 445 0162 84E0      		ldi r24,4
+ 446 0164 F806      		cpc r15,r24
+ 447 0166 00F4      		brsh .L22
+ 448               	.L18:
+ 449               	.LVL36:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 450               		.loc 1 115 5 is_stmt 1 view .LVU94
+ 451               	.LBB14:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 452               		.loc 1 115 10 view .LVU95
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 453               		.loc 1 115 28 discriminator 1 view .LVU96
+ 454 0168 E0E0      		ldi r30,lo8(upc)
+ 455 016a F0E0      		ldi r31,hi8(upc)
+ 456               	.LVL37:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 457               		.loc 1 115 28 is_stmt 0 discriminator 1 view .LVU97
+ 458               	.LBE14:
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 459               		.loc 1 110 8 view .LVU98
+ 460 016c 23E0      		ldi r18,lo8(3)
+ 461 016e 30E0      		ldi r19,0
+ 462               	.LBB15:
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 463               		.loc 1 116 40 view .LVU99
+ 464 0170 0AE0      		ldi r16,lo8(10)
+ 465 0172 10E0      		ldi r17,0
+ 466               	.LVL38:
+ 467               	.L19:
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 468               		.loc 1 116 9 is_stmt 1 view .LVU100
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 469               		.loc 1 116 40 is_stmt 0 view .LVU101
+ 470 0174 C901      		movw r24,r18
+ 471 0176 B801      		movw r22,r16
+ 472 0178 0E94 0000 		call __divmodhi4
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 473               		.loc 1 116 18 view .LVU102
+ 474 017c 8193      		st Z+,r24
+ 475               	.LVL39:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 476               		.loc 1 115 39 is_stmt 1 discriminator 3 view .LVU103
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 477               		.loc 1 115 28 discriminator 1 view .LVU104
+ 478 017e 295F      		subi r18,-7
+ 479 0180 3F4F      		sbci r19,-1
+ 480 0182 2138      		cpi r18,-127
+ 481 0184 8CE1      		ldi r24,28
+ 482 0186 3807      		cpc r19,r24
+ 483 0188 01F4      		brne .L19
+ 484               	.LBE15:
+ 118:simpleserial-bfmax-maskered-8bit.c **** 
+ 485               		.loc 1 118 5 view .LVU105
+ 118:simpleserial-bfmax-maskered-8bit.c **** 
+ 486               		.loc 1 118 21 is_stmt 0 view .LVU106
+ 487 018a F701      		movw r30,r14
+ 488               	.LVL40:
+ 118:simpleserial-bfmax-maskered-8bit.c **** 
+ 489               		.loc 1 118 21 view .LVU107
+ 490 018c E050      		subi r30,lo8(-(upc))
+ 491 018e F040      		sbci r31,hi8(-(upc))
+ 492 0190 8FE0      		ldi r24,lo8(15)
+ 493 0192 8083      		st Z,r24
+ 121:simpleserial-bfmax-maskered-8bit.c ****     volatile POS_T found_col = argmax_u8_vulnerable(upc, N_BITS);
+ 494               		.loc 1 121 5 is_stmt 1 view .LVU108
+ 495 0194 11E0      		ldi r17,lo8(1)
+ 496 0196 1093 0506 		sts 1541,r17
+ 122:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 497               		.loc 1 122 5 view .LVU109
+ 122:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 498               		.loc 1 122 32 is_stmt 0 view .LVU110
+ 499 019a 62E1      		ldi r22,lo8(18)
+ 500 019c 74E0      		ldi r23,lo8(4)
+ 501 019e 80E0      		ldi r24,lo8(upc)
+ 502 01a0 90E0      		ldi r25,hi8(upc)
+ 503 01a2 0E94 0000 		call argmax_u8_vulnerable
+ 504               	.LVL41:
+ 122:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 505               		.loc 1 122 20 discriminator 1 view .LVU111
+ 506 01a6 8B83      		std Y+3,r24
+ 507 01a8 9C83      		std Y+4,r25
+ 123:simpleserial-bfmax-maskered-8bit.c ****     /* --- FINE FINESTRA DI MISURA (Trigger Basso) --- */
+ 508               		.loc 1 123 5 is_stmt 1 view .LVU112
+ 509 01aa 1093 0606 		sts 1542,r17
+ 127:simpleserial-bfmax-maskered-8bit.c ****     resp[0] = (uint8_t)(found_col >> 8);
+ 510               		.loc 1 127 5 view .LVU113
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 511               		.loc 1 128 5 view .LVU114
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 512               		.loc 1 128 35 is_stmt 0 view .LVU115
+ 513 01ae 8B81      		ldd r24,Y+3
+ 514 01b0 9C81      		ldd r25,Y+4
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 515               		.loc 1 128 15 view .LVU116
+ 516 01b2 9983      		std Y+1,r25
+ 129:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 517               		.loc 1 129 5 is_stmt 1 view .LVU117
+ 129:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 518               		.loc 1 129 15 is_stmt 0 view .LVU118
+ 519 01b4 8B81      		ldd r24,Y+3
+ 520 01b6 9C81      		ldd r25,Y+4
+ 521 01b8 8A83      		std Y+2,r24
+ 130:simpleserial-bfmax-maskered-8bit.c **** 
+ 522               		.loc 1 130 5 is_stmt 1 view .LVU119
+ 523 01ba AE01      		movw r20,r28
+ 524 01bc 4F5F      		subi r20,-1
+ 525 01be 5F4F      		sbci r21,-1
+ 526 01c0 62E0      		ldi r22,lo8(2)
+ 527 01c2 82E7      		ldi r24,lo8(114)
+ 528 01c4 0E94 0000 		call simpleserial_put
+ 529               	.LVL42:
+ 132:simpleserial-bfmax-maskered-8bit.c **** }
+ 530               		.loc 1 132 5 view .LVU120
+ 132:simpleserial-bfmax-maskered-8bit.c **** }
+ 531               		.loc 1 132 12 is_stmt 0 view .LVU121
+ 532 01c8 80E0      		ldi r24,0
+ 533               	.LVL43:
+ 534               	.L16:
+ 535               	/* epilogue start */
+ 133:simpleserial-bfmax-maskered-8bit.c **** 
+ 536               		.loc 1 133 1 view .LVU122
+ 537 01ca 2496      		adiw r28,4
+ 538 01cc CDBF      		out __SP_L__,r28
+ 539 01ce DEBF      		out __SP_H__,r29
+ 540 01d0 DF91      		pop r29
+ 541 01d2 CF91      		pop r28
+ 542 01d4 1F91      		pop r17
+ 543 01d6 0F91      		pop r16
+ 544 01d8 FF90      		pop r15
+ 545 01da EF90      		pop r14
+ 546 01dc 0895      		ret
+ 547               	.LVL44:
+ 548               	.L22:
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 549               		.loc 1 110 8 view .LVU123
+ 550 01de 81E1      		ldi r24,lo8(17)
+ 551 01e0 E82E      		mov r14,r24
+ 552 01e2 84E0      		ldi r24,lo8(4)
+ 553 01e4 F82E      		mov r15,r24
+ 554 01e6 00C0      		rjmp .L18
+ 555               		.cfi_endproc
+ 556               	.LFE67:
+ 558               	.global	update_sparse_vulnerable
+ 560               	update_sparse_vulnerable:
+ 561               	.LVL45:
+ 562               	.LFB66:
+  79:simpleserial-bfmax-maskered-8bit.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 563               		.loc 1 79 68 is_stmt 1 view -0
+ 564               		.cfi_startproc
+  79:simpleserial-bfmax-maskered-8bit.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 565               		.loc 1 79 68 is_stmt 0 view .LVU125
+ 566 01e8 CF93      		push r28
+ 567               	.LCFI21:
+ 568               		.cfi_def_cfa_offset 4
+ 569               		.cfi_offset 28, -3
+ 570               	/* prologue: function */
+ 571               	/* frame size = 0 */
+ 572               	/* stack size = 1 */
+ 573               	.L__stack_usage = 1
+ 574 01ea AC01      		movw r20,r24
+  80:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 575               		.loc 1 80 5 is_stmt 1 view .LVU126
+ 576 01ec 60E0      		ldi r22,0
+ 577 01ee 70E0      		ldi r23,0
+  80:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 578               		.loc 1 80 41 is_stmt 0 view .LVU127
+ 579 01f0 8930      		cpi r24,9
+ 580 01f2 9240      		sbci r25,2
+ 581 01f4 00F0      		brlo .L27
+  81:simpleserial-bfmax-maskered-8bit.c **** 
+ 582               		.loc 1 81 51 discriminator 1 view .LVU128
+ 583 01f6 4950      		subi r20,9
+ 584 01f8 5240      		sbci r21,2
+ 585 01fa 6EE1      		ldi r22,lo8(30)
+ 586 01fc 70E0      		ldi r23,0
+ 587               	.L27:
+ 588 01fe DB01      		movw r26,r22
+ 589 0200 A050      		subi r26,lo8(-(Htr_sparse))
+ 590 0202 B040      		sbci r27,hi8(-(Htr_sparse))
+ 591 0204 6050      		subi r22,lo8(-(Htr_sparse+30))
+ 592 0206 7040      		sbci r23,hi8(-(Htr_sparse+30))
+ 593               	.LBB16:
+ 594               	.LBB17:
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 595               		.loc 1 93 28 view .LVU129
+ 596 0208 C1E0      		ldi r28,lo8(1)
+ 597 020a 00C0      		rjmp .L30
+ 598               	.LVL46:
+ 599               	.L31:
+  94:simpleserial-bfmax-maskered-8bit.c **** 
+ 600               		.loc 1 94 16 view .LVU130
+ 601 020c 21E0      		ldi r18,lo8(1)
+ 602               	.L29:
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 603               		.loc 1 96 9 is_stmt 1 view .LVU131
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 604               		.loc 1 96 18 is_stmt 0 view .LVU132
+ 605 020e FC01      		movw r30,r24
+ 606 0210 E050      		subi r30,lo8(-(upc))
+ 607 0212 F040      		sbci r31,hi8(-(upc))
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 608               		.loc 1 96 20 view .LVU133
+ 609 0214 8081      		ld r24,Z
+ 610               	.LVL47:
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 611               		.loc 1 96 20 view .LVU134
+ 612 0216 820F      		add r24,r18
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 613               		.loc 1 96 18 view .LVU135
+ 614 0218 8083      		st Z,r24
+ 615               	.LBE17:
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 616               		.loc 1 83 40 is_stmt 1 discriminator 2 view .LVU136
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 617               		.loc 1 83 27 discriminator 1 view .LVU137
+ 618 021a 6A17      		cp r22,r26
+ 619 021c 7B07      		cpc r23,r27
+ 620 021e 01F0      		breq .L35
+ 621               	.LVL48:
+ 622               	.L30:
+ 623               	.LBB18:
+  86:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+ 624               		.loc 1 86 9 view .LVU138
+  86:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+ 625               		.loc 1 86 38 is_stmt 0 view .LVU139
+ 626 0220 8D91      		ld r24,X+
+ 627 0222 9D91      		ld r25,X+
+  86:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+ 628               		.loc 1 86 15 view .LVU140
+ 629 0224 840F      		add r24,r20
+ 630 0226 951F      		adc r25,r21
+ 631               	.LVL49:
+  87:simpleserial-bfmax-maskered-8bit.c ****             row -= R_BITS;
+ 632               		.loc 1 87 9 is_stmt 1 view .LVU141
+  87:simpleserial-bfmax-maskered-8bit.c ****             row -= R_BITS;
+ 633               		.loc 1 87 12 is_stmt 0 view .LVU142
+ 634 0228 8930      		cpi r24,9
+ 635 022a 22E0      		ldi r18,2
+ 636 022c 9207      		cpc r25,r18
+ 637 022e 00F0      		brlo .L28
+  88:simpleserial-bfmax-maskered-8bit.c ****         }
+ 638               		.loc 1 88 13 is_stmt 1 view .LVU143
+  88:simpleserial-bfmax-maskered-8bit.c ****         }
+ 639               		.loc 1 88 17 is_stmt 0 view .LVU144
+ 640 0230 8950      		subi r24,9
+ 641 0232 9240      		sbci r25,2
+ 642               	.LVL50:
+ 643               	.L28:
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 644               		.loc 1 93 9 is_stmt 1 view .LVU145
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 645               		.loc 1 93 22 is_stmt 0 view .LVU146
+ 646 0234 FC01      		movw r30,r24
+ 647 0236 E050      		subi r30,lo8(-(syndrome_bits))
+ 648 0238 F040      		sbci r31,hi8(-(syndrome_bits))
+ 649 023a 2081      		ld r18,Z
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 650               		.loc 1 93 28 view .LVU147
+ 651 023c 322F      		mov r19,r18
+ 652 023e 3C27      		eor r19,r28
+ 653 0240 3083      		st Z,r19
+  94:simpleserial-bfmax-maskered-8bit.c **** 
+ 654               		.loc 1 94 9 is_stmt 1 view .LVU148
+  94:simpleserial-bfmax-maskered-8bit.c **** 
+ 655               		.loc 1 94 16 is_stmt 0 view .LVU149
+ 656 0242 2130      		cpi r18,lo8(1)
+ 657 0244 01F4      		brne .L31
+ 658 0246 2FEF      		ldi r18,lo8(-1)
+ 659 0248 00C0      		rjmp .L29
+ 660               	.LVL51:
+ 661               	.L35:
+ 662               	/* epilogue start */
+  94:simpleserial-bfmax-maskered-8bit.c **** 
+ 663               		.loc 1 94 16 view .LVU150
+ 664               	.LBE18:
+ 665               	.LBE16:
+  98:simpleserial-bfmax-maskered-8bit.c **** 
+ 666               		.loc 1 98 1 view .LVU151
+ 667 024a CF91      		pop r28
+ 668 024c 0895      		ret
+ 669               		.cfi_endproc
+ 670               	.LFE66:
+ 672               	.global	cmd_run_decoder
+ 674               	cmd_run_decoder:
+ 675               	.LVL52:
+ 676               	.LFB69:
+ 148:simpleserial-bfmax-maskered-8bit.c **** 
+ 149:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+ 150:simpleserial-bfmax-maskered-8bit.c ****  * COMANDO SIMPLESERIAL 'd': Esecuzione Singola Traccia di bfmax_decoder
+ 151:simpleserial-bfmax-maskered-8bit.c ****  * (§5.3 e §5.5 del PDF: esegue le iterazioni con trigger per segmentazione)
+ 152:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+ 153:simpleserial-bfmax-maskered-8bit.c **** uint8_t cmd_run_decoder(uint8_t* in, uint8_t len) {
+ 677               		.loc 1 153 51 is_stmt 1 view -0
+ 678               		.cfi_startproc
+ 679               		.loc 1 153 51 is_stmt 0 view .LVU153
+ 680 024e DF92      		push r13
+ 681               	.LCFI22:
+ 682               		.cfi_def_cfa_offset 4
+ 683               		.cfi_offset 13, -3
+ 684 0250 EF92      		push r14
+ 685               	.LCFI23:
+ 686               		.cfi_def_cfa_offset 5
+ 687               		.cfi_offset 14, -4
+ 688 0252 FF92      		push r15
+ 689               	.LCFI24:
+ 690               		.cfi_def_cfa_offset 6
+ 691               		.cfi_offset 15, -5
+ 692 0254 0F93      		push r16
+ 693               	.LCFI25:
+ 694               		.cfi_def_cfa_offset 7
+ 695               		.cfi_offset 16, -6
+ 696 0256 1F93      		push r17
+ 697               	.LCFI26:
+ 698               		.cfi_def_cfa_offset 8
+ 699               		.cfi_offset 17, -7
+ 700 0258 CF93      		push r28
+ 701               	.LCFI27:
+ 702               		.cfi_def_cfa_offset 9
+ 703               		.cfi_offset 28, -8
+ 704 025a DF93      		push r29
+ 705               	.LCFI28:
+ 706               		.cfi_def_cfa_offset 10
+ 707               		.cfi_offset 29, -9
+ 708 025c 0F92      		push __tmp_reg__
+ 709 025e 0F92      		push __tmp_reg__
+ 710               	.LCFI29:
+ 711               		.cfi_def_cfa_offset 12
+ 712 0260 CDB7      		in r28,__SP_L__
+ 713 0262 DEB7      		in r29,__SP_H__
+ 714               	.LCFI30:
+ 715               		.cfi_def_cfa_register 28
+ 716               	/* prologue: function */
+ 717               	/* frame size = 2 */
+ 718               	/* stack size = 9 */
+ 719               	.L__stack_usage = 9
+ 720 0264 7C01      		movw r14,r24
+ 154:simpleserial-bfmax-maskered-8bit.c ****     /* Inizializza UPC a partire dai byte ricevuti per simulare una sindrome in ingresso */
+ 155:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 721               		.loc 1 155 5 is_stmt 1 view .LVU154
+ 722               	.LBB19:
+ 723               		.loc 1 155 10 view .LVU155
+ 724               	.LVL53:
+ 725               		.loc 1 155 28 discriminator 1 view .LVU156
+ 156:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 726               		.loc 1 156 24 is_stmt 0 view .LVU157
+ 727 0266 062F      		mov r16,r22
+ 728 0268 10E0      		ldi r17,0
+ 729 026a E0E0      		ldi r30,lo8(upc)
+ 730 026c F0E0      		ldi r31,hi8(upc)
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 731               		.loc 1 155 19 view .LVU158
+ 732 026e 20E0      		ldi r18,0
+ 733 0270 30E0      		ldi r19,0
+ 734               		.loc 1 156 16 view .LVU159
+ 735 0272 8BEA      		ldi r24,lo8(-85)
+ 736 0274 D82E      		mov r13,r24
+ 737               	.LVL54:
+ 738               	.L37:
+ 739               		.loc 1 156 9 is_stmt 1 view .LVU160
+ 740               		.loc 1 156 24 is_stmt 0 view .LVU161
+ 741 0276 C901      		movw r24,r18
+ 742 0278 B801      		movw r22,r16
+ 743 027a 0E94 0000 		call __udivmodhi4
+ 744               		.loc 1 156 21 view .LVU162
+ 745 027e D701      		movw r26,r14
+ 746 0280 A80F      		add r26,r24
+ 747 0282 B91F      		adc r27,r25
+ 748               		.loc 1 156 16 view .LVU163
+ 749 0284 8C91      		ld r24,X
+ 750 0286 8227      		eor r24,r18
+ 751 0288 8D9D      		mul r24,r13
+ 752 028a 412D      		mov r20,r1
+ 753 028c 1124      		clr __zero_reg__
+ 754 028e 4695      		lsr r20
+ 755 0290 4695      		lsr r20
+ 756 0292 4695      		lsr r20
+ 757 0294 942F      		mov r25,r20
+ 758 0296 990F      		lsl r25
+ 759 0298 940F      		add r25,r20
+ 760 029a 990F      		lsl r25
+ 761 029c 990F      		lsl r25
+ 762 029e 891B      		sub r24,r25
+ 763 02a0 8193      		st Z+,r24
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 764               		.loc 1 155 39 is_stmt 1 discriminator 3 view .LVU164
+ 765 02a2 2F5F      		subi r18,-1
+ 766 02a4 3F4F      		sbci r19,-1
+ 767               	.LVL55:
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 768               		.loc 1 155 28 discriminator 1 view .LVU165
+ 769 02a6 2231      		cpi r18,18
+ 770 02a8 84E0      		ldi r24,4
+ 771 02aa 3807      		cpc r19,r24
+ 772 02ac 01F4      		brne .L37
+ 773               	.LBE19:
+ 774               	.LBB20:
+ 157:simpleserial-bfmax-maskered-8bit.c ****     }
+ 158:simpleserial-bfmax-maskered-8bit.c **** 
+ 159:simpleserial-bfmax-maskered-8bit.c ****     POS_T last_col = 0;
+ 160:simpleserial-bfmax-maskered-8bit.c **** 
+ 161:simpleserial-bfmax-maskered-8bit.c ****     /* Trigger globale o per-iterazione (come suggerito in §5.5 del PDF) */
+ 162:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t iter = 0; iter < ITER_MAX_BFMAX; iter++) {
+ 775               		.loc 1 162 18 is_stmt 0 view .LVU166
+ 776 02ae F12C      		mov r15,__zero_reg__
+ 163:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 777               		.loc 1 163 56 discriminator 1 view .LVU167
+ 778 02b0 EE24      		clr r14
+ 779 02b2 E394      		inc r14
+ 780               	.LVL56:
+ 781               		.loc 1 163 56 discriminator 1 view .LVU168
+ 782 02b4 00C0      		rjmp .L41
+ 783               	.LVL57:
+ 784               	.L45:
+ 164:simpleserial-bfmax-maskered-8bit.c ****         
+ 165:simpleserial-bfmax-maskered-8bit.c ****         /* 1. Fase di ricerca del massimo (Timing Leak) */
+ 166:simpleserial-bfmax-maskered-8bit.c ****         last_col = argmax_u8_vulnerable(upc, N_BITS);
+ 785               		.loc 1 166 9 is_stmt 1 view .LVU169
+ 786               		.loc 1 166 20 is_stmt 0 view .LVU170
+ 787 02b6 62E1      		ldi r22,lo8(18)
+ 788 02b8 74E0      		ldi r23,lo8(4)
+ 789 02ba 80E0      		ldi r24,lo8(upc)
+ 790 02bc 90E0      		ldi r25,hi8(upc)
+ 791 02be 0E94 0000 		call argmax_u8_vulnerable
+ 792               	.LVL58:
+ 793 02c2 8C01      		movw r16,r24
+ 794               	.LVL59:
+ 167:simpleserial-bfmax-maskered-8bit.c ****         
+ 168:simpleserial-bfmax-maskered-8bit.c ****         /* Azzera il contatore del bit appena flippato per evitare loop statici */
+ 169:simpleserial-bfmax-maskered-8bit.c ****         upc[last_col] = 0;
+ 795               		.loc 1 169 9 is_stmt 1 view .LVU171
+ 796               		.loc 1 169 23 is_stmt 0 view .LVU172
+ 797 02c4 FC01      		movw r30,r24
+ 798 02c6 E050      		subi r30,lo8(-(upc))
+ 799 02c8 F040      		sbci r31,hi8(-(upc))
+ 800 02ca 1082      		st Z,__zero_reg__
+ 170:simpleserial-bfmax-maskered-8bit.c **** 
+ 171:simpleserial-bfmax-maskered-8bit.c ****         /* 2. Fase di aggiornamento sparso (Address Power Leak) */
+ 172:simpleserial-bfmax-maskered-8bit.c ****         update_sparse_vulnerable(last_col);
+ 801               		.loc 1 172 9 is_stmt 1 view .LVU173
+ 802 02cc 0E94 0000 		call update_sparse_vulnerable
+ 803               	.LVL60:
+ 173:simpleserial-bfmax-maskered-8bit.c ****         
+ 174:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_low();
+ 804               		.loc 1 174 9 view .LVU174
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 805               		.loc 1 162 55 discriminator 2 view .LVU175
+ 806 02d0 F394      		inc r15
+ 807               	.LVL61:
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 808               		.loc 1 162 33 discriminator 1 view .LVU176
+ 809 02d2 84E1      		ldi r24,lo8(20)
+ 810 02d4 F816      		cp r15,r24
+ 811 02d6 01F0      		breq .L44
+ 812               	.LVL62:
+ 813               	.L41:
+ 163:simpleserial-bfmax-maskered-8bit.c ****         
+ 814               		.loc 1 163 9 view .LVU177
+ 163:simpleserial-bfmax-maskered-8bit.c ****         
+ 815               		.loc 1 163 12 is_stmt 0 view .LVU178
+ 816 02d8 83E0      		ldi r24,lo8(3)
+ 817 02da F816      		cp r15,r24
+ 818 02dc 00F4      		brsh .L45
+ 163:simpleserial-bfmax-maskered-8bit.c ****         
+ 819               		.loc 1 163 56 is_stmt 1 discriminator 1 view .LVU179
+ 820 02de E092 0506 		sts 1541,r14
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 821               		.loc 1 166 9 view .LVU180
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 822               		.loc 1 166 20 is_stmt 0 view .LVU181
+ 823 02e2 62E1      		ldi r22,lo8(18)
+ 824 02e4 74E0      		ldi r23,lo8(4)
+ 825 02e6 80E0      		ldi r24,lo8(upc)
+ 826 02e8 90E0      		ldi r25,hi8(upc)
+ 827 02ea 0E94 0000 		call argmax_u8_vulnerable
+ 828               	.LVL63:
+ 169:simpleserial-bfmax-maskered-8bit.c **** 
+ 829               		.loc 1 169 9 is_stmt 1 view .LVU182
+ 169:simpleserial-bfmax-maskered-8bit.c **** 
+ 830               		.loc 1 169 23 is_stmt 0 view .LVU183
+ 831 02ee FC01      		movw r30,r24
+ 832 02f0 E050      		subi r30,lo8(-(upc))
+ 833 02f2 F040      		sbci r31,hi8(-(upc))
+ 834 02f4 1082      		st Z,__zero_reg__
+ 172:simpleserial-bfmax-maskered-8bit.c ****         
+ 835               		.loc 1 172 9 is_stmt 1 view .LVU184
+ 836 02f6 0E94 0000 		call update_sparse_vulnerable
+ 837               	.LVL64:
+ 838               		.loc 1 174 9 view .LVU185
+ 839               		.loc 1 174 56 discriminator 1 view .LVU186
+ 840 02fa E092 0606 		sts 1542,r14
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 841               		.loc 1 162 55 discriminator 2 view .LVU187
+ 842 02fe F394      		inc r15
+ 843               	.LVL65:
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 844               		.loc 1 162 33 discriminator 1 view .LVU188
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 845               		.loc 1 162 33 is_stmt 0 discriminator 1 view .LVU189
+ 846 0300 00C0      		rjmp .L41
+ 847               	.LVL66:
+ 848               	.L44:
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if ((iter == 0) || (iter == 1) || (iter == 2)) trigger_high();
+ 849               		.loc 1 162 33 discriminator 1 view .LVU190
+ 850               	.LBE20:
+ 175:simpleserial-bfmax-maskered-8bit.c ****     }
+ 176:simpleserial-bfmax-maskered-8bit.c **** 
+ 177:simpleserial-bfmax-maskered-8bit.c ****     uint8_t resp[2] = { (uint8_t)(last_col >> 8), (uint8_t)(last_col & 0xFF) };
+ 851               		.loc 1 177 5 is_stmt 1 view .LVU191
+ 852               		.loc 1 177 13 is_stmt 0 view .LVU192
+ 853 0302 1027      		eor r17,r16
+ 854 0304 0127      		eor r16,r17
+ 855               	.LVL67:
+ 856               		.loc 1 177 13 view .LVU193
+ 857 0306 1027      		eor r17,r16
+ 858 0308 0983      		std Y+1,r16
+ 859 030a 1A83      		std Y+2,r17
+ 178:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 860               		.loc 1 178 5 is_stmt 1 view .LVU194
+ 861 030c AE01      		movw r20,r28
+ 862 030e 4F5F      		subi r20,-1
+ 863 0310 5F4F      		sbci r21,-1
+ 864 0312 62E0      		ldi r22,lo8(2)
+ 865 0314 82E7      		ldi r24,lo8(114)
+ 866 0316 0E94 0000 		call simpleserial_put
+ 867               	.LVL68:
+ 179:simpleserial-bfmax-maskered-8bit.c ****     return 0x00;
+ 868               		.loc 1 179 5 view .LVU195
+ 180:simpleserial-bfmax-maskered-8bit.c **** }
+ 869               		.loc 1 180 1 is_stmt 0 view .LVU196
+ 870 031a 80E0      		ldi r24,0
+ 871               	/* epilogue start */
+ 872 031c 0F90      		pop __tmp_reg__
+ 873 031e 0F90      		pop __tmp_reg__
+ 874 0320 DF91      		pop r29
+ 875 0322 CF91      		pop r28
+ 876 0324 1F91      		pop r17
+ 877 0326 0F91      		pop r16
+ 878 0328 FF90      		pop r15
+ 879               	.LVL69:
+ 880               		.loc 1 180 1 view .LVU197
+ 881 032a EF90      		pop r14
+ 882 032c DF90      		pop r13
+ 883 032e 0895      		ret
+ 884               		.cfi_endproc
+ 885               	.LFE69:
+ 887               		.section	.text.startup,"ax",@progbits
+ 888               	.global	main
+ 890               	main:
+ 891               	.LFB70:
+ 181:simpleserial-bfmax-maskered-8bit.c **** 
+ 182:simpleserial-bfmax-maskered-8bit.c **** int main(void) {
+ 892               		.loc 1 182 16 is_stmt 1 view -0
+ 893               		.cfi_startproc
+ 894 0000 0F92      		push __tmp_reg__
+ 895               	.LCFI31:
+ 896               		.cfi_def_cfa_offset 4
+ 897 0002 CDB7      		in r28,__SP_L__
+ 898 0004 DEB7      		in r29,__SP_H__
+ 899               	.LCFI32:
+ 900               		.cfi_def_cfa_register 28
+ 901               	/* prologue: function */
+ 902               	/* frame size = 1 */
+ 903               	/* stack size = 1 */
+ 904               	.L__stack_usage = 1
+ 183:simpleserial-bfmax-maskered-8bit.c ****     platform_init();
+ 905               		.loc 1 183 5 view .LVU199
+ 906 0006 0E94 0000 		call platform_init
+ 907               	.LVL70:
+ 184:simpleserial-bfmax-maskered-8bit.c ****     init_uart();
+ 908               		.loc 1 184 5 view .LVU200
+ 909 000a 0E94 0000 		call init_uart0
+ 910               	.LVL71:
+ 185:simpleserial-bfmax-maskered-8bit.c ****     trigger_setup();
+ 911               		.loc 1 185 5 view .LVU201
+ 912 000e 81E0      		ldi r24,lo8(1)
+ 913 0010 8093 0106 		sts 1537,r24
+ 186:simpleserial-bfmax-maskered-8bit.c **** 
+ 187:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_init();
+ 914               		.loc 1 187 5 view .LVU202
+ 915 0014 0E94 0000 		call simpleserial_init
+ 916               	.LVL72:
+ 188:simpleserial-bfmax-maskered-8bit.c **** 
+ 189:simpleserial-bfmax-maskered-8bit.c ****     /* Inizializza una chiave di default */
+ 190:simpleserial-bfmax-maskered-8bit.c ****     uint8_t default_seed = 0x42;
+ 917               		.loc 1 190 5 view .LVU203
+ 918               		.loc 1 190 13 is_stmt 0 view .LVU204
+ 919 0018 82E4      		ldi r24,lo8(66)
+ 920 001a 8983      		std Y+1,r24
+ 191:simpleserial-bfmax-maskered-8bit.c ****     cmd_set_key(&default_seed, 1);
+ 921               		.loc 1 191 5 is_stmt 1 view .LVU205
+ 922 001c 61E0      		ldi r22,lo8(1)
+ 923 001e CE01      		movw r24,r28
+ 924 0020 0196      		adiw r24,1
+ 925 0022 0E94 0000 		call cmd_set_key
+ 926               	.LVL73:
+ 192:simpleserial-bfmax-maskered-8bit.c **** 
+ 193:simpleserial-bfmax-maskered-8bit.c ****     /* Registra i comandi SimpleSerial:
+ 194:simpleserial-bfmax-maskered-8bit.c ****      * 'p' (2 byte) -> Profiling di argmax_u8 con massimo forzato in posizione p
+ 195:simpleserial-bfmax-maskered-8bit.c ****      * 'k' (16 byte)-> Inizializzazione del supporto segreto Htr_sparse
+ 196:simpleserial-bfmax-maskered-8bit.c ****      * 'd' (16 byte)-> Esecuzione completa del ciclo iterativo bfmax_decoder */
+ 197:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_addcmd('p', 2,  cmd_profile_argmax);
+ 927               		.loc 1 197 5 view .LVU206
+ 928 0026 40E0      		ldi r20,lo8(gs(cmd_profile_argmax))
+ 929 0028 50E0      		ldi r21,hi8(gs(cmd_profile_argmax))
+ 930 002a 62E0      		ldi r22,lo8(2)
+ 931 002c 70E0      		ldi r23,0
+ 932 002e 80E7      		ldi r24,lo8(112)
+ 933 0030 0E94 0000 		call simpleserial_addcmd
+ 934               	.LVL74:
+ 198:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_addcmd('k', 16, cmd_set_key);
+ 935               		.loc 1 198 5 view .LVU207
+ 936 0034 40E0      		ldi r20,lo8(gs(cmd_set_key))
+ 937 0036 50E0      		ldi r21,hi8(gs(cmd_set_key))
+ 938 0038 60E1      		ldi r22,lo8(16)
+ 939 003a 70E0      		ldi r23,0
+ 940 003c 8BE6      		ldi r24,lo8(107)
+ 941 003e 0E94 0000 		call simpleserial_addcmd
+ 942               	.LVL75:
+ 199:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_addcmd('d', 16, cmd_run_decoder);
+ 943               		.loc 1 199 5 view .LVU208
+ 944 0042 40E0      		ldi r20,lo8(gs(cmd_run_decoder))
+ 945 0044 50E0      		ldi r21,hi8(gs(cmd_run_decoder))
+ 946 0046 60E1      		ldi r22,lo8(16)
+ 947 0048 70E0      		ldi r23,0
+ 948 004a 84E6      		ldi r24,lo8(100)
+ 949 004c 0E94 0000 		call simpleserial_addcmd
+ 950               	.LVL76:
+ 951               	.L47:
+ 200:simpleserial-bfmax-maskered-8bit.c **** 
+ 201:simpleserial-bfmax-maskered-8bit.c ****     while(1) {
+ 952               		.loc 1 201 5 view .LVU209
+ 202:simpleserial-bfmax-maskered-8bit.c ****         simpleserial_get();
+ 953               		.loc 1 202 9 discriminator 1 view .LVU210
+ 954 0050 0E94 0000 		call simpleserial_get
+ 955               	.LVL77:
+ 201:simpleserial-bfmax-maskered-8bit.c ****         simpleserial_get();
+ 956               		.loc 1 201 10 view .LVU211
+ 957 0054 00C0      		rjmp .L47
+ 958               		.cfi_endproc
+ 959               	.LFE70:
+ 961               		.local	Htr_sparse
+ 962               		.comm	Htr_sparse,60,1
+ 963               		.local	syndrome_bits
+ 964               		.comm	syndrome_bits,521,1
+ 965               		.local	upc
+ 966               		.comm	upc,1042,1
+ 967               		.text
+ 968               	.Letext0:
+ 969               		.file 2 "/usr/lib/avr/include/stdint.h"
+ 970               		.file 3 "/usr/lib/avr/include/avr/iox128d3.h"
+ 971               		.file 4 ".././simpleserial/simpleserial.h"
+ 972               		.file 5 ".././hal/xmega/uart.h"
+ 973               		.file 6 ".././hal/hal.h"
+DEFINED SYMBOLS
+                            *ABS*:00000000 simpleserial-bfmax-maskered-8bit.c
+     /tmp/ccmAclym.s:2      *ABS*:0000003e __SP_H__
+     /tmp/ccmAclym.s:3      *ABS*:0000003d __SP_L__
+     /tmp/ccmAclym.s:4      *ABS*:0000003f __SREG__
+     /tmp/ccmAclym.s:5      *ABS*:0000003b __RAMPZ__
+     /tmp/ccmAclym.s:6      *ABS*:00000034 __CCP__
+     /tmp/ccmAclym.s:7      *ABS*:00000000 __tmp_reg__
+     /tmp/ccmAclym.s:8      *ABS*:00000001 __zero_reg__
+     /tmp/ccmAclym.s:15     .text:00000000 cmd_set_key
+     /tmp/ccmAclym.s:18     .text:00000000 .Loc.0
+     /tmp/ccmAclym.s:19     .text:00000000 L0
+     /tmp/ccmAclym.s:20     .text:00000000 .Loc.1
+     /tmp/ccmAclym.s:50     .text:0000000e .Loc.2
+     /tmp/ccmAclym.s:53     .text:00000012 .Loc.3
+     /tmp/ccmAclym.s:58     .text:00000016 .Loc.4
+     /tmp/ccmAclym.s:64     .text:0000001a .Loc.5
+     /tmp/ccmAclym.s:66     .text:0000001a .Loc.6
+     /tmp/ccmAclym.s:68     .text:0000001a .Loc.7
+     /tmp/ccmAclym.s:70     .text:0000001a .Loc.8
+                             .bss:00000000 Htr_sparse
+     /tmp/ccmAclym.s:77     .text:00000024 .Loc.9
+     /tmp/ccmAclym.s:85     .text:00000028 .Loc.10
+     /tmp/ccmAclym.s:90     .text:0000002c .Loc.11
+     /tmp/ccmAclym.s:91     .text:0000002c .Loc.12
+     /tmp/ccmAclym.s:95     .text:00000034 .Loc.13
+     /tmp/ccmAclym.s:98     .text:00000038 .Loc.14
+     /tmp/ccmAclym.s:99     .text:00000038 .Loc.15
+     /tmp/ccmAclym.s:101    .text:0000003a .Loc.16
+     /tmp/ccmAclym.s:111    .text:0000004c .Loc.17
+     /tmp/ccmAclym.s:116    .text:00000050 .Loc.18
+     /tmp/ccmAclym.s:117    .text:00000050 .Loc.19
+     /tmp/ccmAclym.s:121    .text:00000058 .Loc.20
+     /tmp/ccmAclym.s:124    .text:0000005c .Loc.21
+     /tmp/ccmAclym.s:125    .text:0000005c .Loc.22
+     /tmp/ccmAclym.s:128    .text:00000060 .Loc.23
+     /tmp/ccmAclym.s:133    .text:00000066 .Loc.24
+     /tmp/ccmAclym.s:135    .text:00000066 .Loc.25
+     /tmp/ccmAclym.s:137    .text:00000066 .Loc.26
+     /tmp/ccmAclym.s:138    .text:00000066 .Loc.27
+     /tmp/ccmAclym.s:148    .text:00000076 L0
+     /tmp/ccmAclym.s:153    .text:00000076 argmax_u8_vulnerable
+     /tmp/ccmAclym.s:156    .text:00000076 .Loc.28
+     /tmp/ccmAclym.s:157    .text:00000076 L0
+     /tmp/ccmAclym.s:158    .text:00000076 .Loc.29
+     /tmp/ccmAclym.s:192    .text:00000086 .Loc.30
+     /tmp/ccmAclym.s:194    .text:00000086 .Loc.31
+     /tmp/ccmAclym.s:196    .text:00000086 .Loc.32
+     /tmp/ccmAclym.s:197    .text:00000086 .Loc.33
+     /tmp/ccmAclym.s:199    .text:0000008a L0
+     /tmp/ccmAclym.s:207    .text:00000096 .Loc.34
+     /tmp/ccmAclym.s:213    .text:00000098 .Loc.35
+     /tmp/ccmAclym.s:214    .text:00000098 .Loc.36
+     /tmp/ccmAclym.s:217    .text:0000009a .Loc.37
+     /tmp/ccmAclym.s:222    .text:000000a2 .Loc.38
+     /tmp/ccmAclym.s:228    .text:000000aa .Loc.39
+     /tmp/ccmAclym.s:229    .text:000000aa .Loc.40
+     /tmp/ccmAclym.s:230    .text:000000aa .Loc.41
+     /tmp/ccmAclym.s:233    .text:000000ae .Loc.42
+     /tmp/ccmAclym.s:237    .text:000000b2 .Loc.43
+     /tmp/ccmAclym.s:241    .text:000000b6 .Loc.44
+     /tmp/ccmAclym.s:244    .text:000000b8 .Loc.45
+     /tmp/ccmAclym.s:246    .text:000000b8 .Loc.46
+     /tmp/ccmAclym.s:247    .text:000000b8 .Loc.47
+     /tmp/ccmAclym.s:253    .text:000000be .Loc.48
+     /tmp/ccmAclym.s:257    .text:000000c2 .Loc.49
+     /tmp/ccmAclym.s:259    .text:000000c2 .Loc.50
+     /tmp/ccmAclym.s:263    .text:000000c6 .Loc.51
+     /tmp/ccmAclym.s:268    .text:000000ca .Loc.52
+     /tmp/ccmAclym.s:273    .text:000000ce .Loc.53
+     /tmp/ccmAclym.s:274    .text:000000ce .Loc.54
+     /tmp/ccmAclym.s:276    .text:000000d0 .Loc.55
+     /tmp/ccmAclym.s:279    .text:000000d2 .Loc.56
+     /tmp/ccmAclym.s:280    .text:000000d2 .Loc.57
+     /tmp/ccmAclym.s:281    .text:000000d2 .Loc.58
+     /tmp/ccmAclym.s:284    .text:000000d6 .Loc.59
+     /tmp/ccmAclym.s:289    .text:000000de .Loc.60
+     /tmp/ccmAclym.s:293    .text:000000e2 .Loc.61
+     /tmp/ccmAclym.s:294    .text:000000e2 .Loc.62
+     /tmp/ccmAclym.s:298    .text:000000e8 .Loc.63
+     /tmp/ccmAclym.s:302    .text:000000ec .Loc.64
+     /tmp/ccmAclym.s:303    .text:000000ec .Loc.65
+     /tmp/ccmAclym.s:304    .text:000000ec .Loc.66
+     /tmp/ccmAclym.s:309    .text:000000f4 .Loc.67
+     /tmp/ccmAclym.s:312    .text:000000f6 .Loc.68
+     /tmp/ccmAclym.s:314    .text:000000f8 .Loc.69
+     /tmp/ccmAclym.s:319    .text:000000fe .Loc.70
+     /tmp/ccmAclym.s:322    .text:00000100 .Loc.71
+     /tmp/ccmAclym.s:324    .text:00000102 .Loc.72
+     /tmp/ccmAclym.s:328    .text:00000106 .Loc.73
+     /tmp/ccmAclym.s:329    .text:00000106 .Loc.74
+     /tmp/ccmAclym.s:332    .text:00000108 .Loc.75
+     /tmp/ccmAclym.s:335    .text:0000010a .Loc.76
+     /tmp/ccmAclym.s:337    .text:0000010a .Loc.77
+     /tmp/ccmAclym.s:341    .text:0000010e .Loc.78
+     /tmp/ccmAclym.s:347    .text:00000114 .Loc.79
+     /tmp/ccmAclym.s:351    .text:00000118 .Loc.80
+     /tmp/ccmAclym.s:354    .text:0000011a .Loc.81
+     /tmp/ccmAclym.s:359    .text:00000120 .Loc.82
+     /tmp/ccmAclym.s:364    .text:00000124 .Loc.83
+     /tmp/ccmAclym.s:368    .text:00000128 .Loc.84
+     /tmp/ccmAclym.s:370    .text:00000128 .Loc.85
+     /tmp/ccmAclym.s:379    .text:00000138 L0
+     /tmp/ccmAclym.s:384    .text:00000138 cmd_profile_argmax
+     /tmp/ccmAclym.s:387    .text:00000138 .Loc.86
+     /tmp/ccmAclym.s:388    .text:00000138 L0
+     /tmp/ccmAclym.s:389    .text:00000138 .Loc.87
+     /tmp/ccmAclym.s:414    .text:00000146 L0
+     /tmp/ccmAclym.s:427    .text:0000014e .Loc.88
+     /tmp/ccmAclym.s:428    .text:0000014e .Loc.89
+     /tmp/ccmAclym.s:431    .text:00000150 .Loc.90
+     /tmp/ccmAclym.s:434    .text:00000154 .Loc.91
+     /tmp/ccmAclym.s:436    .text:00000154 .Loc.92
+     /tmp/ccmAclym.s:437    .text:00000154 .Loc.93
+     /tmp/ccmAclym.s:450    .text:00000168 .Loc.94
+     /tmp/ccmAclym.s:452    .text:00000168 .Loc.95
+     /tmp/ccmAclym.s:453    .text:00000168 .Loc.96
+     /tmp/ccmAclym.s:964    .bss:00000245 upc
+     /tmp/ccmAclym.s:457    .text:0000016c .Loc.97
+     /tmp/ccmAclym.s:459    .text:0000016c .Loc.98
+     /tmp/ccmAclym.s:463    .text:00000170 .Loc.99
+     /tmp/ccmAclym.s:468    .text:00000174 .Loc.100
+     /tmp/ccmAclym.s:469    .text:00000174 .Loc.101
+     /tmp/ccmAclym.s:473    .text:0000017c .Loc.102
+     /tmp/ccmAclym.s:476    .text:0000017e .Loc.103
+     /tmp/ccmAclym.s:477    .text:0000017e .Loc.104
+     /tmp/ccmAclym.s:485    .text:0000018a .Loc.105
+     /tmp/ccmAclym.s:486    .text:0000018a .Loc.106
+     /tmp/ccmAclym.s:489    .text:0000018c .Loc.107
+     /tmp/ccmAclym.s:494    .text:00000194 .Loc.108
+     /tmp/ccmAclym.s:497    .text:0000019a .Loc.109
+     /tmp/ccmAclym.s:498    .text:0000019a .Loc.110
+     /tmp/ccmAclym.s:505    .text:000001a6 .Loc.111
+     /tmp/ccmAclym.s:508    .text:000001aa .Loc.112
+     /tmp/ccmAclym.s:510    .text:000001ae .Loc.113
+     /tmp/ccmAclym.s:511    .text:000001ae .Loc.114
+     /tmp/ccmAclym.s:512    .text:000001ae .Loc.115
+     /tmp/ccmAclym.s:515    .text:000001b2 .Loc.116
+     /tmp/ccmAclym.s:517    .text:000001b4 .Loc.117
+     /tmp/ccmAclym.s:518    .text:000001b4 .Loc.118
+     /tmp/ccmAclym.s:522    .text:000001ba .Loc.119
+     /tmp/ccmAclym.s:530    .text:000001c8 .Loc.120
+     /tmp/ccmAclym.s:531    .text:000001c8 .Loc.121
+     /tmp/ccmAclym.s:536    .text:000001ca .Loc.122
+     /tmp/ccmAclym.s:549    .text:000001de .Loc.123
+     /tmp/ccmAclym.s:555    .text:000001e8 L0
+     /tmp/ccmAclym.s:560    .text:000001e8 update_sparse_vulnerable
+     /tmp/ccmAclym.s:563    .text:000001e8 .Loc.124
+     /tmp/ccmAclym.s:564    .text:000001e8 L0
+     /tmp/ccmAclym.s:565    .text:000001e8 .Loc.125
+     /tmp/ccmAclym.s:575    .text:000001ec .Loc.126
+     /tmp/ccmAclym.s:578    .text:000001f0 .Loc.127
+     /tmp/ccmAclym.s:582    .text:000001f6 .Loc.128
+     /tmp/ccmAclym.s:595    .text:00000208 .Loc.129
+     /tmp/ccmAclym.s:600    .text:0000020c .Loc.130
+     /tmp/ccmAclym.s:603    .text:0000020e .Loc.131
+     /tmp/ccmAclym.s:604    .text:0000020e .Loc.132
+     /tmp/ccmAclym.s:608    .text:00000214 .Loc.133
+     /tmp/ccmAclym.s:611    .text:00000216 .Loc.134
+     /tmp/ccmAclym.s:613    .text:00000218 .Loc.135
+     /tmp/ccmAclym.s:616    .text:0000021a .Loc.136
+     /tmp/ccmAclym.s:617    .text:0000021a .Loc.137
+     /tmp/ccmAclym.s:624    .text:00000220 .Loc.138
+     /tmp/ccmAclym.s:625    .text:00000220 .Loc.139
+     /tmp/ccmAclym.s:628    .text:00000224 .Loc.140
+     /tmp/ccmAclym.s:632    .text:00000228 .Loc.141
+     /tmp/ccmAclym.s:633    .text:00000228 .Loc.142
+     /tmp/ccmAclym.s:638    .text:00000230 .Loc.143
+     /tmp/ccmAclym.s:639    .text:00000230 .Loc.144
+     /tmp/ccmAclym.s:644    .text:00000234 .Loc.145
+     /tmp/ccmAclym.s:645    .text:00000234 .Loc.146
+     /tmp/ccmAclym.s:962    .bss:0000003c syndrome_bits
+     /tmp/ccmAclym.s:650    .text:0000023c .Loc.147
+     /tmp/ccmAclym.s:654    .text:00000242 .Loc.148
+     /tmp/ccmAclym.s:655    .text:00000242 .Loc.149
+     /tmp/ccmAclym.s:663    .text:0000024a .Loc.150
+     /tmp/ccmAclym.s:666    .text:0000024a .Loc.151
+     /tmp/ccmAclym.s:669    .text:0000024e L0
+     /tmp/ccmAclym.s:674    .text:0000024e cmd_run_decoder
+     /tmp/ccmAclym.s:677    .text:0000024e .Loc.152
+     /tmp/ccmAclym.s:678    .text:0000024e L0
+     /tmp/ccmAclym.s:679    .text:0000024e .Loc.153
+     /tmp/ccmAclym.s:721    .text:00000266 .Loc.154
+     /tmp/ccmAclym.s:723    .text:00000266 .Loc.155
+     /tmp/ccmAclym.s:725    .text:00000266 .Loc.156
+     /tmp/ccmAclym.s:726    .text:00000266 .Loc.157
+     /tmp/ccmAclym.s:731    .text:0000026e .Loc.158
+     /tmp/ccmAclym.s:734    .text:00000272 .Loc.159
+     /tmp/ccmAclym.s:739    .text:00000276 .Loc.160
+     /tmp/ccmAclym.s:740    .text:00000276 .Loc.161
+     /tmp/ccmAclym.s:744    .text:0000027e .Loc.162
+     /tmp/ccmAclym.s:748    .text:00000284 .Loc.163
+     /tmp/ccmAclym.s:764    .text:000002a2 .Loc.164
+     /tmp/ccmAclym.s:768    .text:000002a6 .Loc.165
+     /tmp/ccmAclym.s:775    .text:000002ae .Loc.166
+     /tmp/ccmAclym.s:777    .text:000002b0 .Loc.167
+     /tmp/ccmAclym.s:781    .text:000002b4 .Loc.168
+     /tmp/ccmAclym.s:785    .text:000002b6 .Loc.169
+     /tmp/ccmAclym.s:786    .text:000002b6 .Loc.170
+     /tmp/ccmAclym.s:795    .text:000002c4 .Loc.171
+     /tmp/ccmAclym.s:796    .text:000002c4 .Loc.172
+     /tmp/ccmAclym.s:801    .text:000002cc .Loc.173
+     /tmp/ccmAclym.s:804    .text:000002d0 .Loc.174
+     /tmp/ccmAclym.s:805    .text:000002d0 .Loc.175
+     /tmp/ccmAclym.s:808    .text:000002d2 .Loc.176
+     /tmp/ccmAclym.s:814    .text:000002d8 .Loc.177
+     /tmp/ccmAclym.s:815    .text:000002d8 .Loc.178
+     /tmp/ccmAclym.s:819    .text:000002de .Loc.179
+     /tmp/ccmAclym.s:821    .text:000002e2 .Loc.180
+     /tmp/ccmAclym.s:822    .text:000002e2 .Loc.181
+     /tmp/ccmAclym.s:829    .text:000002ee .Loc.182
+     /tmp/ccmAclym.s:830    .text:000002ee .Loc.183
+     /tmp/ccmAclym.s:835    .text:000002f6 .Loc.184
+     /tmp/ccmAclym.s:838    .text:000002fa .Loc.185
+     /tmp/ccmAclym.s:839    .text:000002fa .Loc.186
+     /tmp/ccmAclym.s:841    .text:000002fe .Loc.187
+     /tmp/ccmAclym.s:844    .text:00000300 .Loc.188
+     /tmp/ccmAclym.s:845    .text:00000300 .Loc.189
+     /tmp/ccmAclym.s:849    .text:00000302 .Loc.190
+     /tmp/ccmAclym.s:851    .text:00000302 .Loc.191
+     /tmp/ccmAclym.s:852    .text:00000302 .Loc.192
+     /tmp/ccmAclym.s:856    .text:00000306 .Loc.193
+     /tmp/ccmAclym.s:860    .text:0000030c .Loc.194
+     /tmp/ccmAclym.s:868    .text:0000031a .Loc.195
+     /tmp/ccmAclym.s:869    .text:0000031a .Loc.196
+     /tmp/ccmAclym.s:880    .text:0000032a .Loc.197
+     /tmp/ccmAclym.s:884    .text:00000330 L0
+     /tmp/ccmAclym.s:890    .text.startup:00000000 main
+     /tmp/ccmAclym.s:892    .text.startup:00000000 .Loc.198
+     /tmp/ccmAclym.s:893    .text.startup:00000000 L0
+     /tmp/ccmAclym.s:905    .text.startup:00000006 .Loc.199
+     /tmp/ccmAclym.s:908    .text.startup:0000000a .Loc.200
+     /tmp/ccmAclym.s:911    .text.startup:0000000e .Loc.201
+     /tmp/ccmAclym.s:914    .text.startup:00000014 .Loc.202
+     /tmp/ccmAclym.s:917    .text.startup:00000018 .Loc.203
+     /tmp/ccmAclym.s:918    .text.startup:00000018 .Loc.204
+     /tmp/ccmAclym.s:921    .text.startup:0000001c .Loc.205
+     /tmp/ccmAclym.s:927    .text.startup:00000026 .Loc.206
+     /tmp/ccmAclym.s:935    .text.startup:00000034 .Loc.207
+     /tmp/ccmAclym.s:943    .text.startup:00000042 .Loc.208
+     /tmp/ccmAclym.s:952    .text.startup:00000050 .Loc.209
+     /tmp/ccmAclym.s:953    .text.startup:00000050 .Loc.210
+     /tmp/ccmAclym.s:956    .text.startup:00000054 .Loc.211
+     /tmp/ccmAclym.s:958    .text.startup:00000056 L0
+     /tmp/ccmAclym.s:974    .text:00000330 L0
+     /tmp/ccmAclym.s:967    .text.startup:00000056 L0
+                     .debug_frame:00000000 L0
+     /tmp/ccmAclym.s:61     .text:0000001a .L2
+     /tmp/ccmAclym.s:89     .text:0000002c .L3
+     /tmp/ccmAclym.s:115    .text:00000050 .L4
+     /tmp/ccmAclym.s:363    .text:00000124 .L13
+     /tmp/ccmAclym.s:210    .text:00000098 .L11
+     /tmp/ccmAclym.s:272    .text:000000ce .L12
+     /tmp/ccmAclym.s:534    .text:000001ca .L16
+     /tmp/ccmAclym.s:548    .text:000001de .L22
+     /tmp/ccmAclym.s:467    .text:00000174 .L19
+     /tmp/ccmAclym.s:448    .text:00000168 .L18
+     /tmp/ccmAclym.s:587    .text:000001fe .L27
+     /tmp/ccmAclym.s:622    .text:00000220 .L30
+     /tmp/ccmAclym.s:661    .text:0000024a .L35
+     /tmp/ccmAclym.s:643    .text:00000234 .L28
+     /tmp/ccmAclym.s:599    .text:0000020c .L31
+     /tmp/ccmAclym.s:602    .text:0000020e .L29
+     /tmp/ccmAclym.s:738    .text:00000276 .L37
+     /tmp/ccmAclym.s:813    .text:000002d8 .L41
+     /tmp/ccmAclym.s:848    .text:00000302 .L44
+     /tmp/ccmAclym.s:784    .text:000002b6 .L45
+     /tmp/ccmAclym.s:951    .text.startup:00000050 .L47
+     /tmp/ccmAclym.s:2144   .debug_abbrev:00000000 .Ldebug_abbrev0
+     /tmp/ccmAclym.s:3882   .debug_ranges:00000000 .Ldebug_ranges0
+     /tmp/ccmAclym.s:3922   .debug_line:00000000 .Ldebug_line0
+     /tmp/ccmAclym.s:891    .text.startup:00000000 .LFB70
+     /tmp/ccmAclym.s:959    .text.startup:00000056 .LFE70
+     /tmp/ccmAclym.s:2654   .debug_loc:00000000 .LLST34
+     /tmp/ccmAclym.s:907    .text.startup:0000000a .LVL70
+     /tmp/ccmAclym.s:910    .text.startup:0000000e .LVL71
+     /tmp/ccmAclym.s:916    .text.startup:00000018 .LVL72
+     /tmp/ccmAclym.s:926    .text.startup:00000026 .LVL73
+     /tmp/ccmAclym.s:934    .text.startup:00000034 .LVL74
+     /tmp/ccmAclym.s:942    .text.startup:00000042 .LVL75
+     /tmp/ccmAclym.s:950    .text.startup:00000050 .LVL76
+     /tmp/ccmAclym.s:955    .text.startup:00000054 .LVL77
+     /tmp/ccmAclym.s:676    .text:0000024e .LFB69
+     /tmp/ccmAclym.s:885    .text:00000330 .LFE69
+     /tmp/ccmAclym.s:2674   .debug_loc:0000002e .LLST28
+     /tmp/ccmAclym.s:2743   .debug_loc:000000bd .LLST29
+     /tmp/ccmAclym.s:2736   .debug_loc:000000b7 .LVUS29
+     /tmp/ccmAclym.s:2784   .debug_loc:000000ff .LLST30
+     /tmp/ccmAclym.s:2777   .debug_loc:000000f9 .LVUS30
+     /tmp/ccmAclym.s:2819   .debug_loc:0000013b .LLST31
+     /tmp/ccmAclym.s:2808   .debug_loc:00000131 .LVUS31
+     /tmp/ccmAclym.s:722    .text:00000266 .LBB19
+     /tmp/ccmAclym.s:773    .text:000002ae .LBE19
+     /tmp/ccmAclym.s:2864   .debug_loc:0000018f .LLST32
+     /tmp/ccmAclym.s:2859   .debug_loc:0000018b .LVUS32
+     /tmp/ccmAclym.s:774    .text:000002ae .LBB20
+     /tmp/ccmAclym.s:850    .text:00000302 .LBE20
+     /tmp/ccmAclym.s:2884   .debug_loc:000001b5 .LLST33
+     /tmp/ccmAclym.s:2881   .debug_loc:000001b3 .LVUS33
+     /tmp/ccmAclym.s:792    .text:000002c2 .LVL58
+     /tmp/ccmAclym.s:803    .text:000002d0 .LVL60
+     /tmp/ccmAclym.s:828    .text:000002ee .LVL63
+     /tmp/ccmAclym.s:837    .text:000002fa .LVL64
+     /tmp/ccmAclym.s:867    .text:0000031a .LVL68
+     /tmp/ccmAclym.s:17     .text:00000000 .LFB68
+     /tmp/ccmAclym.s:149    .text:00000076 .LFE68
+     /tmp/ccmAclym.s:2891   .debug_loc:000001c8 .LLST0
+     /tmp/ccmAclym.s:2943   .debug_loc:00000231 .LLST1
+     /tmp/ccmAclym.s:2936   .debug_loc:0000022b .LVUS1
+     /tmp/ccmAclym.s:2982   .debug_loc:00000271 .LLST2
+     /tmp/ccmAclym.s:2977   .debug_loc:0000026d .LVUS2
+     /tmp/ccmAclym.s:3007   .debug_loc:0000029c .LLST3
+     /tmp/ccmAclym.s:3002   .debug_loc:00000298 .LVUS3
+     /tmp/ccmAclym.s:3023   .debug_loc:000002be .LLST4
+     /tmp/ccmAclym.s:3020   .debug_loc:000002bc .LVUS4
+     /tmp/ccmAclym.s:386    .text:00000138 .LFB67
+     /tmp/ccmAclym.s:556    .text:000001e8 .LFE67
+     /tmp/ccmAclym.s:3031   .debug_loc:000002d2 .LLST20
+     /tmp/ccmAclym.s:3096   .debug_loc:00000356 .LLST21
+     /tmp/ccmAclym.s:3087   .debug_loc:0000034e .LVUS21
+     /tmp/ccmAclym.s:3146   .debug_loc:000003a8 .LLST22
+     /tmp/ccmAclym.s:3139   .debug_loc:000003a2 .LVUS22
+     /tmp/ccmAclym.s:3177   .debug_loc:000003e0 .LLST23
+     /tmp/ccmAclym.s:3170   .debug_loc:000003da .LVUS23
+     /tmp/ccmAclym.s:3240   .debug_loc:00000438 .LLST24
+     /tmp/ccmAclym.s:3231   .debug_loc:00000430 .LVUS24
+     /tmp/ccmAclym.s:504    .text:000001a6 .LVL41
+     /tmp/ccmAclym.s:529    .text:000001c8 .LVL42
+     /tmp/ccmAclym.s:562    .text:000001e8 .LFB66
+     /tmp/ccmAclym.s:670    .text:0000024e .LFE66
+     /tmp/ccmAclym.s:3275   .debug_loc:00000485 .LLST25
+     /tmp/ccmAclym.s:3295   .debug_loc:000004ab .LLST26
+     /tmp/ccmAclym.s:3290   .debug_loc:000004a7 .LVUS26
+     /tmp/ccmAclym.s:593    .text:00000208 .LBB16
+     /tmp/ccmAclym.s:665    .text:0000024a .LBE16
+     /tmp/ccmAclym.s:3329   .debug_loc:000004df .LLST27
+     /tmp/ccmAclym.s:3320   .debug_loc:000004d7 .LVUS27
+     /tmp/ccmAclym.s:155    .text:00000076 .LFB65
+     /tmp/ccmAclym.s:380    .text:00000138 .LFE65
+     /tmp/ccmAclym.s:3368   .debug_loc:0000052d .LLST5
+     /tmp/ccmAclym.s:3430   .debug_loc:000005a7 .LLST6
+     /tmp/ccmAclym.s:3419   .debug_loc:0000059d .LVUS6
+     /tmp/ccmAclym.s:3493   .debug_loc:0000060d .LLST7
+     /tmp/ccmAclym.s:3486   .debug_loc:00000607 .LVUS7
+     /tmp/ccmAclym.s:3532   .debug_loc:0000064d .LLST8
+     /tmp/ccmAclym.s:3523   .debug_loc:00000645 .LVUS8
+     /tmp/ccmAclym.s:3558   .debug_loc:00000687 .LLST9
+     /tmp/ccmAclym.s:3553   .debug_loc:00000683 .LVUS9
+     /tmp/ccmAclym.s:3584   .debug_loc:000006b3 .LLST10
+     /tmp/ccmAclym.s:3579   .debug_loc:000006af .LVUS10
+     /tmp/ccmAclym.s:3616   .debug_loc:000006e5 .LLST11
+     /tmp/ccmAclym.s:3605   .debug_loc:000006db .LVUS11
+     /tmp/ccmAclym.s:212    .text:00000098 .LBB9
+     /tmp/ccmAclym.s:245    .text:000000b8 .LBE9
+     /tmp/ccmAclym.s:3662   .debug_loc:0000073a .LLST12
+     /tmp/ccmAclym.s:3657   .debug_loc:00000736 .LVUS12
+     /tmp/ccmAclym.s:3682   .debug_loc:00000760 .LLST13
+     /tmp/ccmAclym.s:3677   .debug_loc:0000075c .LVUS13
+     /tmp/ccmAclym.s:3704   .debug_loc:00000788 .LLST14
+     /tmp/ccmAclym.s:3701   .debug_loc:00000786 .LVUS14
+     /tmp/ccmAclym.s:267    .text:000000ca .LBB12
+     /tmp/ccmAclym.s:336    .text:0000010a .LBE12
+     /tmp/ccmAclym.s:3721   .debug_loc:000007a4 .LLST15
+     /tmp/ccmAclym.s:3716   .debug_loc:000007a0 .LVUS15
+     /tmp/ccmAclym.s:3744   .debug_loc:000007cd .LLST16
+     /tmp/ccmAclym.s:3739   .debug_loc:000007c9 .LVUS16
+     /tmp/ccmAclym.s:3790   .debug_loc:0000080d .LLST17
+     /tmp/ccmAclym.s:3787   .debug_loc:0000080b .LVUS17
+     /tmp/ccmAclym.s:3809   .debug_loc:0000082b .LLST18
+     /tmp/ccmAclym.s:3802   .debug_loc:00000825 .LVUS18
+     /tmp/ccmAclym.s:3841   .debug_loc:00000864 .LLST19
+     /tmp/ccmAclym.s:3834   .debug_loc:0000085e .LVUS19
+     /tmp/ccmAclym.s:895    .text.startup:00000002 .LCFI31
+     /tmp/ccmAclym.s:899    .text.startup:00000006 .LCFI32
+     /tmp/ccmAclym.s:681    .text:00000250 .LCFI22
+     /tmp/ccmAclym.s:685    .text:00000252 .LCFI23
+     /tmp/ccmAclym.s:689    .text:00000254 .LCFI24
+     /tmp/ccmAclym.s:693    .text:00000256 .LCFI25
+     /tmp/ccmAclym.s:697    .text:00000258 .LCFI26
+     /tmp/ccmAclym.s:701    .text:0000025a .LCFI27
+     /tmp/ccmAclym.s:705    .text:0000025c .LCFI28
+     /tmp/ccmAclym.s:710    .text:00000260 .LCFI29
+     /tmp/ccmAclym.s:714    .text:00000264 .LCFI30
+     /tmp/ccmAclym.s:675    .text:0000024e .LVL52
+     /tmp/ccmAclym.s:737    .text:00000276 .LVL54
+     /tmp/ccmAclym.s:780    .text:000002b4 .LVL56
+     /tmp/ccmAclym.s:783    .text:000002b6 .LVL57
+     /tmp/ccmAclym.s:794    .text:000002c4 .LVL59
+     /tmp/ccmAclym.s:812    .text:000002d8 .LVL62
+     /tmp/ccmAclym.s:847    .text:00000302 .LVL66
+     /tmp/ccmAclym.s:855    .text:00000306 .LVL67
+     /tmp/ccmAclym.s:724    .text:00000266 .LVL53
+     /tmp/ccmAclym.s:879    .text:0000032a .LVL69
+     /tmp/ccmAclym.s:22     .text:00000002 .LCFI0
+     /tmp/ccmAclym.s:26     .text:00000004 .LCFI1
+     /tmp/ccmAclym.s:30     .text:00000006 .LCFI2
+     /tmp/ccmAclym.s:34     .text:00000008 .LCFI3
+     /tmp/ccmAclym.s:38     .text:0000000a .LCFI4
+     /tmp/ccmAclym.s:42     .text:0000000c .LCFI5
+     /tmp/ccmAclym.s:16     .text:00000000 .LVL0
+     /tmp/ccmAclym.s:76     .text:00000024 .LVL2
+     /tmp/ccmAclym.s:82     .text:00000028 .LVL3
+     /tmp/ccmAclym.s:88     .text:0000002c .LVL4
+     /tmp/ccmAclym.s:67     .text:0000001a .LVL1
+     /tmp/ccmAclym.s:114    .text:00000050 .LVL5
+     /tmp/ccmAclym.s:134    .text:00000066 .LVL6
+     /tmp/ccmAclym.s:391    .text:0000013a .LCFI13
+     /tmp/ccmAclym.s:395    .text:0000013c .LCFI14
+     /tmp/ccmAclym.s:399    .text:0000013e .LCFI15
+     /tmp/ccmAclym.s:403    .text:00000140 .LCFI16
+     /tmp/ccmAclym.s:407    .text:00000142 .LCFI17
+     /tmp/ccmAclym.s:411    .text:00000144 .LCFI18
+     /tmp/ccmAclym.s:416    .text:00000148 .LCFI19
+     /tmp/ccmAclym.s:420    .text:0000014c .LCFI20
+     /tmp/ccmAclym.s:385    .text:00000138 .LVL33
+     /tmp/ccmAclym.s:430    .text:00000150 .LVL34
+     /tmp/ccmAclym.s:456    .text:0000016c .LVL37
+     /tmp/ccmAclym.s:547    .text:000001de .LVL44
+     /tmp/ccmAclym.s:466    .text:00000174 .LVL38
+     /tmp/ccmAclym.s:435    .text:00000154 .LVL35
+     /tmp/ccmAclym.s:449    .text:00000168 .LVL36
+     /tmp/ccmAclym.s:533    .text:000001ca .LVL43
+     /tmp/ccmAclym.s:475    .text:0000017e .LVL39
+     /tmp/ccmAclym.s:488    .text:0000018c .LVL40
+     /tmp/ccmAclym.s:567    .text:000001ea .LCFI21
+     /tmp/ccmAclym.s:561    .text:000001e8 .LVL45
+     /tmp/ccmAclym.s:598    .text:0000020c .LVL46
+     /tmp/ccmAclym.s:610    .text:00000216 .LVL47
+     /tmp/ccmAclym.s:621    .text:00000220 .LVL48
+     /tmp/ccmAclym.s:631    .text:00000228 .LVL49
+     /tmp/ccmAclym.s:660    .text:0000024a .LVL51
+     /tmp/ccmAclym.s:160    .text:00000078 .LCFI6
+     /tmp/ccmAclym.s:164    .text:0000007a .LCFI7
+     /tmp/ccmAclym.s:168    .text:0000007c .LCFI8
+     /tmp/ccmAclym.s:172    .text:0000007e .LCFI9
+     /tmp/ccmAclym.s:176    .text:00000080 .LCFI10
+     /tmp/ccmAclym.s:180    .text:00000082 .LCFI11
+     /tmp/ccmAclym.s:184    .text:00000084 .LCFI12
+     /tmp/ccmAclym.s:154    .text:00000076 .LVL7
+     /tmp/ccmAclym.s:209    .text:00000098 .LVL9
+     /tmp/ccmAclym.s:271    .text:000000ce .LVL17
+     /tmp/ccmAclym.s:362    .text:00000124 .LVL31
+     /tmp/ccmAclym.s:367    .text:00000128 .LVL32
+     /tmp/ccmAclym.s:193    .text:00000086 .LVL8
+     /tmp/ccmAclym.s:240    .text:000000b6 .LVL13
+     /tmp/ccmAclym.s:243    .text:000000b8 .LVL14
+     /tmp/ccmAclym.s:353    .text:0000011a .LVL29
+     /tmp/ccmAclym.s:311    .text:000000f6 .LVL21
+     /tmp/ccmAclym.s:327    .text:00000106 .LVL24
+     /tmp/ccmAclym.s:331    .text:00000108 .LVL25
+     /tmp/ccmAclym.s:334    .text:0000010a .LVL26
+     /tmp/ccmAclym.s:350    .text:00000118 .LVL28
+     /tmp/ccmAclym.s:216    .text:0000009a .LVL10
+     /tmp/ccmAclym.s:262    .text:000000c6 .LVL16
+     /tmp/ccmAclym.s:227    .text:000000aa .LVL11
+     /tmp/ccmAclym.s:236    .text:000000b2 .LVL12
+     /tmp/ccmAclym.s:256    .text:000000c2 .LVL15
+     /tmp/ccmAclym.s:278    .text:000000d2 .LVL18
+     /tmp/ccmAclym.s:292    .text:000000e2 .LVL19
+     /tmp/ccmAclym.s:301    .text:000000ec .LVL20
+     /tmp/ccmAclym.s:318    .text:000000fe .LVL22
+     /tmp/ccmAclym.s:321    .text:00000100 .LVL23
+     /tmp/ccmAclym.s:358    .text:00000120 .LVL30
+     /tmp/ccmAclym.s:975    .debug_info:00000000 .Ldebug_info0
+     /tmp/ccmAclym.s:10     .text:00000000 .Ltext0
+     /tmp/ccmAclym.s:968    .text:00000330 .Letext0
+     /tmp/ccmAclym.s:56     .text:00000016 .LBB2
+     /tmp/ccmAclym.s:63     .text:0000001a .LBE2
+     /tmp/ccmAclym.s:65     .text:0000001a .LBB6
+     /tmp/ccmAclym.s:79     .text:00000024 .LBE6
+     /tmp/ccmAclym.s:83     .text:00000028 .LBB7
+     /tmp/ccmAclym.s:136    .text:00000066 .LBE7
+     /tmp/ccmAclym.s:195    .text:00000086 .LBB8
+     /tmp/ccmAclym.s:206    .text:00000096 .LBE8
+     /tmp/ccmAclym.s:211    .text:00000098 .LBB10
+     /tmp/ccmAclym.s:251    .text:000000be .LBE10
+     /tmp/ccmAclym.s:252    .text:000000be .LBB11
+     /tmp/ccmAclym.s:258    .text:000000c2 .LBE11
+     /tmp/ccmAclym.s:266    .text:000000ca .LBB13
+     /tmp/ccmAclym.s:346    .text:00000114 .LBE13
+     /tmp/ccmAclym.s:451    .text:00000168 .LBB14
+     /tmp/ccmAclym.s:458    .text:0000016c .LBE14
+     /tmp/ccmAclym.s:462    .text:00000170 .LBB15
+     /tmp/ccmAclym.s:484    .text:0000018a .LBE15
+     /tmp/ccmAclym.s:594    .text:00000208 .LBB17
+     /tmp/ccmAclym.s:615    .text:0000021a .LBE17
+     /tmp/ccmAclym.s:623    .text:00000220 .LBB18
+     /tmp/ccmAclym.s:664    .text:0000024a .LBE18
+
+UNDEFINED SYMBOLS
+__divmodhi4
+simpleserial_put
+__udivmodhi4
+platform_init
+init_uart0
+simpleserial_init
+simpleserial_addcmd
+simpleserial_get
+__do_clear_bss

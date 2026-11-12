@@ -1,0 +1,95 @@
+   1               		.file	"hal.c"
+   2               	__SP_H__ = 0x3e
+   3               	__SP_L__ = 0x3d
+   4               	__SREG__ = 0x3f
+   5               	__RAMPZ__ = 0x3b
+   6               	__CCP__ = 0x34
+   7               	__tmp_reg__ = 0
+   8               	__zero_reg__ = 1
+   9               		.text
+  10               	.Ltext0:
+  11               		.cfi_sections	.debug_frame
+  12               		.file 1 ".././hal/hal.c"
+  13               		.weak	led_ok
+  15               	led_ok:
+  16               	.LVL0:
+  17               	.LFB65:
+   1:.././hal/hal.c **** /*
+   2:.././hal/hal.c ****     This file is part of the ChipWhisperer Example Targets
+   3:.././hal/hal.c ****     Copyright (C) 2012-2015 NewAE Technology Inc.
+   4:.././hal/hal.c **** 
+   5:.././hal/hal.c ****     This program is free software: you can redistribute it and/or modify
+   6:.././hal/hal.c ****     it under the terms of the GNU General Public License as published by
+   7:.././hal/hal.c ****     the Free Software Foundation, either version 3 of the License, or
+   8:.././hal/hal.c ****     (at your option) any later version.
+   9:.././hal/hal.c **** 
+  10:.././hal/hal.c ****     This program is distributed in the hope that it will be useful,
+  11:.././hal/hal.c ****     but WITHOUT ANY WARRANTY; without even the implied warranty of
+  12:.././hal/hal.c ****     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  13:.././hal/hal.c ****     GNU General Public License for more details.
+  14:.././hal/hal.c **** 
+  15:.././hal/hal.c ****     You should have received a copy of the GNU General Public License
+  16:.././hal/hal.c ****     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  17:.././hal/hal.c **** */
+  18:.././hal/hal.c **** 
+  19:.././hal/hal.c **** #include "hal.h"
+  20:.././hal/hal.c **** 
+  21:.././hal/hal.c **** __attribute__((weak)) void led_ok(unsigned int status)
+  22:.././hal/hal.c **** {
+  18               		.loc 1 22 1 view -0
+  19               		.cfi_startproc
+  20               	/* prologue: function */
+  21               	/* frame size = 0 */
+  22               	/* stack size = 0 */
+  23               	.L__stack_usage = 0
+  23:.././hal/hal.c **** }
+  24               		.loc 1 23 1 view .LVU1
+  25               	/* epilogue start */
+  26 0000 0895      		ret
+  27               		.cfi_endproc
+  28               	.LFE65:
+  30               		.weak	led_error
+  32               	led_error:
+  33               	.LFB68:
+  34               		.cfi_startproc
+  24:.././hal/hal.c **** 
+  25:.././hal/hal.c **** __attribute__((weak)) void led_error(unsigned int status)
+  35               		.loc 1 25 28 view .LVU2
+  36               	/* prologue: function */
+  37               	/* frame size = 0 */
+  38               	/* stack size = 0 */
+  39               	.L__stack_usage = 0
+  40               	/* epilogue start */
+  41 0002 0895      		ret
+  42               		.cfi_endproc
+  43               	.LFE68:
+  45               	.Letext0:
+DEFINED SYMBOLS
+                            *ABS*:00000000 hal.c
+     /tmp/ccmnlLTT.s:2      *ABS*:0000003e __SP_H__
+     /tmp/ccmnlLTT.s:3      *ABS*:0000003d __SP_L__
+     /tmp/ccmnlLTT.s:4      *ABS*:0000003f __SREG__
+     /tmp/ccmnlLTT.s:5      *ABS*:0000003b __RAMPZ__
+     /tmp/ccmnlLTT.s:6      *ABS*:00000034 __CCP__
+     /tmp/ccmnlLTT.s:7      *ABS*:00000000 __tmp_reg__
+     /tmp/ccmnlLTT.s:8      *ABS*:00000001 __zero_reg__
+     /tmp/ccmnlLTT.s:15     .text:00000000 led_ok
+     /tmp/ccmnlLTT.s:18     .text:00000000 .Loc.0
+     /tmp/ccmnlLTT.s:19     .text:00000000 L0
+     /tmp/ccmnlLTT.s:24     .text:00000000 .Loc.1
+     /tmp/ccmnlLTT.s:27     .text:00000002 L0
+     /tmp/ccmnlLTT.s:32     .text:00000002 led_error
+     /tmp/ccmnlLTT.s:34     .text:00000002 L0
+     /tmp/ccmnlLTT.s:35     .text:00000002 .Loc.2
+     /tmp/ccmnlLTT.s:42     .text:00000004 L0
+     /tmp/ccmnlLTT.s:46     .text:00000004 L0
+                     .debug_frame:00000000 L0
+     /tmp/ccmnlLTT.s:148    .debug_abbrev:00000000 .Ldebug_abbrev0
+     /tmp/ccmnlLTT.s:10     .text:00000000 .Ltext0
+     /tmp/ccmnlLTT.s:45     .text:00000004 .Letext0
+     /tmp/ccmnlLTT.s:283    .debug_line:00000000 .Ldebug_line0
+     /tmp/ccmnlLTT.s:17     .text:00000000 .LFB65
+     /tmp/ccmnlLTT.s:28     .text:00000002 .LFE65
+     /tmp/ccmnlLTT.s:47     .debug_info:00000000 .Ldebug_info0
+
+NO UNDEFINED SYMBOLS

@@ -1,0 +1,1251 @@
+   1              		.cpu cortex-m4
+   2              		.arch armv7e-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 2
+  11              		.eabi_attribute 34, 1
+  12              		.eabi_attribute 18, 4
+  13              		.file	"simpleserial-bfmax-maskered-8bit.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "simpleserial-bfmax-maskered-8bit.c"
+  18              		.section	.text.cmd_set_key,"ax",%progbits
+  19              		.align	1
+  20              		.p2align 2,,3
+  21              		.global	cmd_set_key
+  22              		.syntax unified
+  23              		.thumb
+  24              		.thumb_func
+  26              	cmd_set_key:
+  27              	.LVL0:
+  28              	.LFB3:
+   1:simpleserial-bfmax-maskered-8bit.c **** #include "hal.h"
+   2:simpleserial-bfmax-maskered-8bit.c **** #include "simpleserial.h"
+   3:simpleserial-bfmax-maskered-8bit.c **** #include <stdint.h>
+   4:simpleserial-bfmax-maskered-8bit.c **** #include <stdlib.h>
+   5:simpleserial-bfmax-maskered-8bit.c **** #include <string.h>
+   6:simpleserial-bfmax-maskered-8bit.c **** 
+   7:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+   8:simpleserial-bfmax-maskered-8bit.c ****  * PARAMETRI CRITTOGRAFICI SCALATI PER SRAM MICROCONTROLLORE (CW-Lite)
+   9:simpleserial-bfmax-maskered-8bit.c ****  * Adatta R_BITS in base alla RAM disponibile (es. 512 per XMEGA, 4096 per STM32)
+  10:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+  11:simpleserial-bfmax-maskered-8bit.c **** #define N0 2
+  12:simpleserial-bfmax-maskered-8bit.c **** #define R_BITS 521
+  13:simpleserial-bfmax-maskered-8bit.c **** #define N_BITS (N0 * R_BITS)
+  14:simpleserial-bfmax-maskered-8bit.c **** #define D_WEIGHT 15          /* Peso della riga sparsa segreta (supp(h)) */
+  15:simpleserial-bfmax-maskered-8bit.c **** #define ITER_MAX_BFMAX 20    /* Numero massimo di iterazioni del decoder */
+  16:simpleserial-bfmax-maskered-8bit.c **** 
+  17:simpleserial-bfmax-maskered-8bit.c **** typedef uint16_t POS_T;
+  18:simpleserial-bfmax-maskered-8bit.c **** 
+  19:simpleserial-bfmax-maskered-8bit.c **** /* Strutture dati del decoder e della chiave segreta (stile LEDA/BIKE KEM-CPA) */
+  20:simpleserial-bfmax-maskered-8bit.c **** static uint8_t upc[N_BITS];
+  21:simpleserial-bfmax-maskered-8bit.c **** static uint8_t syndrome_bits[R_BITS];
+  22:simpleserial-bfmax-maskered-8bit.c **** static POS_T Htr_sparse[N0][D_WEIGHT];
+  23:simpleserial-bfmax-maskered-8bit.c **** 
+  24:simpleserial-bfmax-maskered-8bit.c **** 
+  25:simpleserial-bfmax-maskered-8bit.c **** 
+  26:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+  27:simpleserial-bfmax-maskered-8bit.c ****  * FUNZIONE 1 OTTIMIZZATA: argmax_u8
+  28:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+  29:simpleserial-bfmax-maskered-8bit.c **** POS_T __attribute__((noinline)) argmax_u8_vulnerable(const uint8_t *arr, uint16_t len) {
+  30:simpleserial-bfmax-maskered-8bit.c ****     uint8_t max_val = 0;
+  31:simpleserial-bfmax-maskered-8bit.c **** 
+  32:simpleserial-bfmax-maskered-8bit.c ****     /* Passo 1: Ricerca del valore massimo assoluto (tempo costante su tutta la lunghezza) */
+  33:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < len; i++) {
+  34:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t is_greater = (uint8_t)((max_val - arr[i]) >> 7); 
+  36:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+  37:simpleserial-bfmax-maskered-8bit.c ****         
+  38:simpleserial-bfmax-maskered-8bit.c ****         max_val = (max_val & ~mask) | (arr[i] & mask);
+  39:simpleserial-bfmax-maskered-8bit.c ****     }
+  40:simpleserial-bfmax-maskered-8bit.c **** 
+  41:simpleserial-bfmax-maskered-8bit.c ****     //Variabile di salvataggio del massimo
+  42:simpleserial-bfmax-maskered-8bit.c ****     POS_T max_col = 0;
+  43:simpleserial-bfmax-maskered-8bit.c ****     POS_T found_flag = 0; // Flag per indicare se il massimo è stato trovato, serve per ignorare t
+  44:simpleserial-bfmax-maskered-8bit.c **** 
+  45:simpleserial-bfmax-maskered-8bit.c ****     /* Passo 2: Ricerca della prima posizione 'col' corrispondente a max_val.
+  46:simpleserial-bfmax-maskered-8bit.c ****     Optimized: salvataggio massimo e maschera per il branchless */
+  47:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < len; i++) {
+  48:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+  49:simpleserial-bfmax-maskered-8bit.c ****         uint8_t diff = arr[i] ^ max_val;
+  50:simpleserial-bfmax-maskered-8bit.c **** 
+  51:simpleserial-bfmax-maskered-8bit.c ****         /* is_equal = 1 se arr[i] == max_val, altrimenti 0 */
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_not_equal = ((uint16_t)(diff | (uint8_t)(-diff)) >> 7) & 1;
+  53:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+  54:simpleserial-bfmax-maskered-8bit.c **** 
+  55:simpleserial-bfmax-maskered-8bit.c ****         /* Condizione attiva SOLO se è uguale E non è ancora stato trovato (found_flag == 0) */
+  56:simpleserial-bfmax-maskered-8bit.c ****         uint16_t take_this = is_equal & (1 - found_flag);
+  57:simpleserial-bfmax-maskered-8bit.c **** 
+  58:simpleserial-bfmax-maskered-8bit.c ****         /* Espande take_this in maschera a 16 bit:
+  59:simpleserial-bfmax-maskered-8bit.c ****          * take_this == 1 -> 0xFFFF
+  60:simpleserial-bfmax-maskered-8bit.c ****          * take_this == 0 -> 0x0000 */
+  61:simpleserial-bfmax-maskered-8bit.c ****         uint16_t mask = (uint16_t)(-(int16_t)take_this);
+  62:simpleserial-bfmax-maskered-8bit.c **** 
+  63:simpleserial-bfmax-maskered-8bit.c ****         /* Selezione multiplexer bitwise:
+  64:simpleserial-bfmax-maskered-8bit.c ****          * se mask == 0xFFFF -> col_found assume 'i'
+  65:simpleserial-bfmax-maskered-8bit.c ****          * se mask == 0x0000 -> col_found resta invariato */
+  66:simpleserial-bfmax-maskered-8bit.c ****         max_col = (max_col & ~mask) | (i & mask);
+  67:simpleserial-bfmax-maskered-8bit.c **** 
+  68:simpleserial-bfmax-maskered-8bit.c ****         /* Aggiorna il flag: una volta a 1, resta 1 fino alla fine del ciclo */
+  69:simpleserial-bfmax-maskered-8bit.c ****         found_flag |= is_equal;
+  70:simpleserial-bfmax-maskered-8bit.c ****     }
+  71:simpleserial-bfmax-maskered-8bit.c **** 
+  72:simpleserial-bfmax-maskered-8bit.c ****     return max_col;
+  73:simpleserial-bfmax-maskered-8bit.c **** }
+  74:simpleserial-bfmax-maskered-8bit.c **** 
+  75:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+  76:simpleserial-bfmax-maskered-8bit.c ****  * FUNZIONE VULNERABILE 2: update_syndrome_and_upcs
+  77:simpleserial-bfmax-maskered-8bit.c ****  * Contiene l'indirizzamento di memoria dipendente dal segreto Htr_sparse.
+  78:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+  79:simpleserial-bfmax-maskered-8bit.c **** void __attribute__((noinline)) update_sparse_vulnerable(POS_T col) {
+  80:simpleserial-bfmax-maskered-8bit.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+  81:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+  82:simpleserial-bfmax-maskered-8bit.c **** 
+  83:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t k = 0; k < D_WEIGHT; k++) {
+  84:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+  85:simpleserial-bfmax-maskered-8bit.c ****          * row = (Htr_sparse[block][k] + col_bit) mod R_BITS */
+  86:simpleserial-bfmax-maskered-8bit.c ****         POS_T row = Htr_sparse[block][k] + col_bit;
+  87:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+  88:simpleserial-bfmax-maskered-8bit.c ****             row -= R_BITS;
+  89:simpleserial-bfmax-maskered-8bit.c ****         }
+  90:simpleserial-bfmax-maskered-8bit.c **** 
+  91:simpleserial-bfmax-maskered-8bit.c ****         /* Flip del bit di sindrome e aggiornamento contatore UPC.
+  92:simpleserial-bfmax-maskered-8bit.c ****          * VULNERABILITA': L'indirizzo toccato dipende da Htr_sparse! */
+  93:simpleserial-bfmax-maskered-8bit.c ****         syndrome_bits[row] ^= 1;
+  94:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+  95:simpleserial-bfmax-maskered-8bit.c **** 
+  96:simpleserial-bfmax-maskered-8bit.c ****         upc[row] = (uint8_t)(upc[row] + delta);
+  97:simpleserial-bfmax-maskered-8bit.c ****     }
+  98:simpleserial-bfmax-maskered-8bit.c **** }
+  99:simpleserial-bfmax-maskered-8bit.c **** 
+ 100:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+ 101:simpleserial-bfmax-maskered-8bit.c ****  * COMANDO SIMPLESERIAL 'p': Profiling diretto del Timing Leak di argmax_u8
+ 102:simpleserial-bfmax-maskered-8bit.c ****  * (§5.2 Fase 1 del PDF: riceve la posizione target p = (p_high << 8) | p_low,
+ 103:simpleserial-bfmax-maskered-8bit.c ****  * posiziona il massimo esattamente in 'p' e misura la finestra con il trigger)
+ 104:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+ 105:simpleserial-bfmax-maskered-8bit.c **** uint8_t cmd_profile_argmax(uint8_t* pt, uint8_t len) {
+ 106:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 107:simpleserial-bfmax-maskered-8bit.c **** 
+ 108:simpleserial-bfmax-maskered-8bit.c ****     /* Estrae la posizione target 'p' inviata dallo script Python ChipWhisperer */
+ 109:simpleserial-bfmax-maskered-8bit.c ****     POS_T target_pos = ((uint16_t)pt[0] << 8) | pt[1];
+ 110:simpleserial-bfmax-maskered-8bit.c ****     if (target_pos >= N_BITS) {
+ 111:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 112:simpleserial-bfmax-maskered-8bit.c ****     }
+ 113:simpleserial-bfmax-maskered-8bit.c **** 
+ 114:simpleserial-bfmax-maskered-8bit.c ****     /* Prepara l'array UPC con rumore di fondo basso e il picco massimo in target_pos */
+ 115:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 116:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 117:simpleserial-bfmax-maskered-8bit.c ****     }
+ 118:simpleserial-bfmax-maskered-8bit.c ****     upc[target_pos] = 15; /* Massimo unico garantito in posizione target_pos */
+ 119:simpleserial-bfmax-maskered-8bit.c **** 
+ 120:simpleserial-bfmax-maskered-8bit.c ****     /* --- INIZIO FINESTRA DI MISURA (Trigger Alto) --- */
+ 121:simpleserial-bfmax-maskered-8bit.c ****     trigger_high();
+ 122:simpleserial-bfmax-maskered-8bit.c ****     volatile POS_T found_col = argmax_u8_vulnerable(upc, N_BITS);
+ 123:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 124:simpleserial-bfmax-maskered-8bit.c ****     /* --- FINE FINESTRA DI MISURA (Trigger Basso) --- */
+ 125:simpleserial-bfmax-maskered-8bit.c **** 
+ 126:simpleserial-bfmax-maskered-8bit.c ****     /* Restituisce la posizione trovata via SimpleSerial 'r' per verifica */
+ 127:simpleserial-bfmax-maskered-8bit.c ****     uint8_t resp[2];
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[0] = (uint8_t)(found_col >> 8);
+ 129:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 130:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 131:simpleserial-bfmax-maskered-8bit.c **** 
+ 132:simpleserial-bfmax-maskered-8bit.c ****     return 0x00;
+ 133:simpleserial-bfmax-maskered-8bit.c **** }
+ 134:simpleserial-bfmax-maskered-8bit.c **** 
+ 135:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+ 136:simpleserial-bfmax-maskered-8bit.c ****  * COMANDO SIMPLESERIAL 'k': Imposta una chiave segreta sparsa Htr_sparse nota
+ 137:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+ 138:simpleserial-bfmax-maskered-8bit.c **** uint8_t cmd_set_key(uint8_t* k, uint8_t len) {
+  29              		.loc 1 138 46 view -0
+  30              		.cfi_startproc
+  31              		@ args = 0, pretend = 0, frame = 0
+  32              		@ frame_needed = 0, uses_anonymous_args = 0
+  33              		@ link register save eliminated.
+ 139:simpleserial-bfmax-maskered-8bit.c ****     /* Popola il supporto della chiave segreta in modo deterministico dal seme k[0] */
+ 140:simpleserial-bfmax-maskered-8bit.c ****     uint8_t seed = (len > 0) ? k[0] : 0x42;
+  34              		.loc 1 140 5 view .LVU1
+ 138:simpleserial-bfmax-maskered-8bit.c ****     /* Popola il supporto della chiave segreta in modo deterministico dal seme k[0] */
+  35              		.loc 1 138 46 is_stmt 0 view .LVU2
+  36 0000 30B4     		push	{r4, r5}
+  37              	.LCFI0:
+  38              		.cfi_def_cfa_offset 8
+  39              		.cfi_offset 4, -8
+  40              		.cfi_offset 5, -4
+  41              		.loc 1 140 13 view .LVU3
+  42 0002 49B3     		cbz	r1, .L5
+  43              	.LBB2:
+  44              	.LBB3:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 142:simpleserial-bfmax-maskered-8bit.c ****         for (uint8_t j = 0; j < D_WEIGHT; j++) {
+ 143:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  45              		.loc 1 143 50 view .LVU4
+  46 0004 0278     		ldrb	r2, [r0]	@ zero_extendqisi2
+  47              	.L2:
+  48              	.LBE3:
+  49              	.LBE2:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+  50              		.loc 1 141 5 is_stmt 1 view .LVU5
+  51              	.LBB5:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+  52              		.loc 1 141 10 view .LVU6
+  53              	.LVL1:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+  54              		.loc 1 141 27 discriminator 1 view .LVU7
+  55              	.LBB4:
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  56              		.loc 1 142 31 discriminator 1 view .LVU8
+  57 0006 1548     		ldr	r0, .L10
+  58              	.LVL2:
+  59              		.loc 1 143 69 is_stmt 0 view .LVU9
+  60 0008 154D     		ldr	r5, .L10+4
+  61 000a 1146     		mov	r1, r2
+  62              	.LVL3:
+  63              		.loc 1 143 69 view .LVU10
+  64 000c 00F11E04 		add	r4, r0, #30
+  65              	.LVL4:
+  66              	.L3:
+  67              		.loc 1 143 13 is_stmt 1 view .LVU11
+  68              		.loc 1 143 69 is_stmt 0 view .LVU12
+  69 0010 A5FB01C3 		umull	ip, r3, r5, r1
+  70 0014 5B0A     		lsrs	r3, r3, #9
+  71 0016 03EB831C 		add	ip, r3, r3, lsl #6
+  72 001a 03EBCC03 		add	r3, r3, ip, lsl #3
+  73 001e CB1A     		subs	r3, r1, r3
+  74              		.loc 1 143 32 view .LVU13
+  75 0020 20F8023F 		strh	r3, [r0, #2]!	@ movhi
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  76              		.loc 1 142 44 is_stmt 1 discriminator 3 view .LVU14
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  77              		.loc 1 142 31 discriminator 1 view .LVU15
+  78 0024 8442     		cmp	r4, r0
+  79 0026 01F11F01 		add	r1, r1, #31
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  80              		.loc 1 142 31 is_stmt 0 discriminator 1 view .LVU16
+  81 002a F1D1     		bne	.L3
+  82 002c 0D49     		ldr	r1, .L10+8
+  83              		.loc 1 143 69 view .LVU17
+  84 002e 0C4C     		ldr	r4, .L10+4
+  85 0030 1132     		adds	r2, r2, #17
+  86 0032 01F11E0C 		add	ip, r1, #30
+  87              	.LVL5:
+  88              	.L4:
+  89              		.loc 1 143 13 is_stmt 1 view .LVU18
+  90              		.loc 1 143 69 is_stmt 0 view .LVU19
+  91 0036 A4FB0203 		umull	r0, r3, r4, r2
+  92 003a 5B0A     		lsrs	r3, r3, #9
+  93 003c 03EB8310 		add	r0, r3, r3, lsl #6
+  94 0040 03EBC003 		add	r3, r3, r0, lsl #3
+  95 0044 D31A     		subs	r3, r2, r3
+  96              		.loc 1 143 32 view .LVU20
+  97 0046 21F8023F 		strh	r3, [r1, #2]!	@ movhi
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  98              		.loc 1 142 44 is_stmt 1 discriminator 3 view .LVU21
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+  99              		.loc 1 142 31 discriminator 1 view .LVU22
+ 100 004a 8C45     		cmp	ip, r1
+ 101 004c 02F11F02 		add	r2, r2, #31
+ 142:simpleserial-bfmax-maskered-8bit.c ****             Htr_sparse[b][j] = (POS_T)(((j * 31) + seed + (b * 17)) % R_BITS);
+ 102              		.loc 1 142 31 is_stmt 0 discriminator 1 view .LVU23
+ 103 0050 F1D1     		bne	.L4
+ 104              	.LBE4:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 105              		.loc 1 141 34 is_stmt 1 discriminator 2 view .LVU24
+ 106              	.LVL6:
+ 141:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t b = 0; b < N0; b++) {
+ 107              		.loc 1 141 27 discriminator 1 view .LVU25
+ 108              	.LBE5:
+ 144:simpleserial-bfmax-maskered-8bit.c ****         }
+ 145:simpleserial-bfmax-maskered-8bit.c ****     }
+ 146:simpleserial-bfmax-maskered-8bit.c ****     return 0x00;
+ 109              		.loc 1 146 5 view .LVU26
+ 147:simpleserial-bfmax-maskered-8bit.c **** }
+ 110              		.loc 1 147 1 is_stmt 0 view .LVU27
+ 111 0052 0020     		movs	r0, #0
+ 112 0054 30BC     		pop	{r4, r5}
+ 113              	.LCFI1:
+ 114              		.cfi_remember_state
+ 115              		.cfi_restore 5
+ 116              		.cfi_restore 4
+ 117              		.cfi_def_cfa_offset 0
+ 118 0056 7047     		bx	lr
+ 119              	.LVL7:
+ 120              	.L5:
+ 121              	.LCFI2:
+ 122              		.cfi_restore_state
+ 123              		.loc 1 147 1 view .LVU28
+ 124 0058 4222     		movs	r2, #66
+ 125 005a D4E7     		b	.L2
+ 126              	.L11:
+ 127              		.align	2
+ 128              	.L10:
+ 129 005c FEFFFFFF 		.word	.LANCHOR0-2
+ 130 0060 73E693FB 		.word	-74193293
+ 131 0064 1C000000 		.word	.LANCHOR0+28
+ 132              		.cfi_endproc
+ 133              	.LFE3:
+ 135              		.section	.text.argmax_u8_vulnerable,"ax",%progbits
+ 136              		.align	1
+ 137              		.p2align 2,,3
+ 138              		.global	argmax_u8_vulnerable
+ 139              		.syntax unified
+ 140              		.thumb
+ 141              		.thumb_func
+ 143              	argmax_u8_vulnerable:
+ 144              	.LVL8:
+ 145              	.LFB0:
+  29:simpleserial-bfmax-maskered-8bit.c ****     uint8_t max_val = 0;
+ 146              		.loc 1 29 88 is_stmt 1 view -0
+ 147              		.cfi_startproc
+ 148              		@ args = 0, pretend = 0, frame = 0
+ 149              		@ frame_needed = 0, uses_anonymous_args = 0
+  30:simpleserial-bfmax-maskered-8bit.c **** 
+ 150              		.loc 1 30 5 view .LVU30
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 151              		.loc 1 33 5 view .LVU31
+ 152              	.LBB6:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 153              		.loc 1 33 10 view .LVU32
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 154              		.loc 1 33 28 discriminator 1 view .LVU33
+ 155 0000 A9B3     		cbz	r1, .L16
+ 156              	.LBE6:
+  29:simpleserial-bfmax-maskered-8bit.c ****     uint8_t max_val = 0;
+ 157              		.loc 1 29 88 is_stmt 0 view .LVU34
+ 158 0002 F0B5     		push	{r4, r5, r6, r7, lr}
+ 159              	.LCFI3:
+ 160              		.cfi_def_cfa_offset 20
+ 161              		.cfi_offset 4, -20
+ 162              		.cfi_offset 5, -16
+ 163              		.cfi_offset 6, -12
+ 164              		.cfi_offset 7, -8
+ 165              		.cfi_offset 14, -4
+ 166 0004 0446     		mov	r4, r0
+ 167 0006 0F18     		adds	r7, r1, r0
+  30:simpleserial-bfmax-maskered-8bit.c **** 
+ 168              		.loc 1 30 13 view .LVU35
+ 169 0008 4FF0000E 		mov	lr, #0
+ 170              	.LVL9:
+ 171              	.L14:
+ 172              	.LBB8:
+ 173              	.LBB7:
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 174              		.loc 1 35 9 is_stmt 1 view .LVU36
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 175              		.loc 1 35 54 is_stmt 0 view .LVU37
+ 176 000c 14F8012B 		ldrb	r2, [r4], #1	@ zero_extendqisi2
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 177              		.loc 1 35 49 view .LVU38
+ 178 0010 AEEB0203 		sub	r3, lr, r2
+  35:simpleserial-bfmax-maskered-8bit.c ****         uint8_t mask = (uint8_t)(-(int8_t)is_greater);
+ 179              		.loc 1 35 17 view .LVU39
+ 180 0014 C3F3C713 		ubfx	r3, r3, #7, #8
+ 181              	.LVL10:
+  36:simpleserial-bfmax-maskered-8bit.c ****         
+ 182              		.loc 1 36 9 is_stmt 1 view .LVU40
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 183              		.loc 1 38 9 view .LVU41
+  36:simpleserial-bfmax-maskered-8bit.c ****         
+ 184              		.loc 1 36 17 is_stmt 0 view .LVU42
+ 185 0018 5E42     		rsbs	r6, r3, #0
+ 186 001a 013B     		subs	r3, r3, #1
+ 187              	.LVL11:
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 188              		.loc 1 38 37 view .LVU43
+ 189 001c 3240     		ands	r2, r2, r6
+ 190 001e 0EEA0303 		and	r3, lr, r3
+ 191              	.LVL12:
+  38:simpleserial-bfmax-maskered-8bit.c ****     }
+ 192              		.loc 1 38 37 view .LVU44
+ 193              	.LBE7:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 194              		.loc 1 33 28 discriminator 1 view .LVU45
+ 195 0022 BC42     		cmp	r4, r7
+ 196 0024 42EA030E 		orr	lr, r2, r3
+ 197              	.LVL13:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 198              		.loc 1 33 36 is_stmt 1 discriminator 3 view .LVU46
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 199              		.loc 1 33 28 discriminator 1 view .LVU47
+ 200 0028 F0D1     		bne	.L14
+ 201              	.LVL14:
+  33:simpleserial-bfmax-maskered-8bit.c ****         /* Maschera: tutti 1(0xFF) se arr[i] > max_val, altrimenti tutti 0 (0x00) */
+ 202              		.loc 1 33 28 is_stmt 0 discriminator 1 view .LVU48
+ 203              	.LBE8:
+ 204              	.LBB9:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 205              		.loc 1 47 28 is_stmt 1 discriminator 1 view .LVU49
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 206              		.loc 1 47 19 is_stmt 0 view .LVU50
+ 207 002a 4FF0000C 		mov	ip, #0
+ 208 002e 451E     		subs	r5, r0, #1
+ 209              	.LBE9:
+  43:simpleserial-bfmax-maskered-8bit.c **** 
+ 210              		.loc 1 43 11 view .LVU51
+ 211 0030 6446     		mov	r4, ip
+  42:simpleserial-bfmax-maskered-8bit.c ****     POS_T found_flag = 0; // Flag per indicare se il massimo è stato trovato, serve per ignorare t
+ 212              		.loc 1 42 11 view .LVU52
+ 213 0032 6046     		mov	r0, ip
+ 214              	.LVL15:
+ 215              	.L15:
+ 216              	.LBB13:
+ 217              	.LBB10:
+  49:simpleserial-bfmax-maskered-8bit.c **** 
+ 218              		.loc 1 49 9 is_stmt 1 view .LVU53
+  49:simpleserial-bfmax-maskered-8bit.c **** 
+ 219              		.loc 1 49 17 is_stmt 0 view .LVU54
+ 220 0034 15F8013F 		ldrb	r3, [r5, #1]!	@ zero_extendqisi2
+ 221 0038 8EEA0303 		eor	r3, lr, r3
+ 222              	.LVL16:
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 223              		.loc 1 52 9 is_stmt 1 view .LVU55
+  53:simpleserial-bfmax-maskered-8bit.c **** 
+ 224              		.loc 1 53 9 view .LVU56
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 225              		.loc 1 52 52 is_stmt 0 view .LVU57
+ 226 003c 5E42     		rsbs	r6, r3, #0
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 227              		.loc 1 52 76 view .LVU58
+ 228 003e 3343     		orrs	r3, r3, r6
+ 229              	.LVL17:
+  52:simpleserial-bfmax-maskered-8bit.c ****         uint16_t is_equal = 1 - is_not_equal;
+ 230              		.loc 1 52 76 view .LVU59
+ 231 0040 C3F3C013 		ubfx	r3, r3, #7, #1
+  56:simpleserial-bfmax-maskered-8bit.c **** 
+ 232              		.loc 1 56 44 view .LVU60
+ 233 0044 84F00102 		eor	r2, r4, #1
+  53:simpleserial-bfmax-maskered-8bit.c **** 
+ 234              		.loc 1 53 18 view .LVU61
+ 235 0048 83F00103 		eor	r3, r3, #1
+ 236              	.LVL18:
+  56:simpleserial-bfmax-maskered-8bit.c **** 
+ 237              		.loc 1 56 9 is_stmt 1 view .LVU62
+  56:simpleserial-bfmax-maskered-8bit.c **** 
+ 238              		.loc 1 56 18 is_stmt 0 view .LVU63
+ 239 004c 1A40     		ands	r2, r2, r3
+ 240              	.LVL19:
+  61:simpleserial-bfmax-maskered-8bit.c **** 
+ 241              		.loc 1 61 9 is_stmt 1 view .LVU64
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 242              		.loc 1 66 9 view .LVU65
+ 243 004e 561E     		subs	r6, r2, #1
+ 244              	.LVL20:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 245              		.loc 1 66 9 is_stmt 0 view .LVU66
+ 246              	.LBE10:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 247              		.loc 1 47 36 discriminator 3 view .LVU67
+ 248 0050 0CF10107 		add	r7, ip, #1
+ 249              	.LBB11:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 250              		.loc 1 66 37 view .LVU68
+ 251 0054 5242     		rsbs	r2, r2, #0
+ 252              	.LVL21:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 253              		.loc 1 66 37 view .LVU69
+ 254 0056 02EA0C02 		and	r2, r2, ip
+ 255              	.LVL22:
+  66:simpleserial-bfmax-maskered-8bit.c **** 
+ 256              		.loc 1 66 37 view .LVU70
+ 257              	.LBE11:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 258              		.loc 1 47 36 discriminator 3 view .LVU71
+ 259 005a 1FFA87FC 		uxth	ip, r7
+ 260              	.LVL23:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 261              		.loc 1 47 36 discriminator 3 view .LVU72
+ 262 005e 0640     		ands	r6, r6, r0
+ 263              	.LVL24:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 264              		.loc 1 47 28 discriminator 1 view .LVU73
+ 265 0060 6145     		cmp	r1, ip
+ 266 0062 46EA0200 		orr	r0, r6, r2
+ 267              	.LVL25:
+ 268              	.LBB12:
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 269              		.loc 1 69 9 is_stmt 1 view .LVU74
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 270              		.loc 1 69 20 is_stmt 0 view .LVU75
+ 271 0066 44EA0304 		orr	r4, r4, r3
+ 272              	.LVL26:
+  69:simpleserial-bfmax-maskered-8bit.c ****     }
+ 273              		.loc 1 69 20 view .LVU76
+ 274              	.LBE12:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 275              		.loc 1 47 36 is_stmt 1 discriminator 3 view .LVU77
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 276              		.loc 1 47 28 discriminator 1 view .LVU78
+ 277 006a E3D1     		bne	.L15
+ 278              	.LVL27:
+  47:simpleserial-bfmax-maskered-8bit.c ****         /* Calcola la differenza */
+ 279              		.loc 1 47 28 is_stmt 0 discriminator 1 view .LVU79
+ 280              	.LBE13:
+  72:simpleserial-bfmax-maskered-8bit.c **** }
+ 281              		.loc 1 72 5 is_stmt 1 view .LVU80
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 282              		.loc 1 73 1 is_stmt 0 view .LVU81
+ 283 006c F0BD     		pop	{r4, r5, r6, r7, pc}
+ 284              	.LVL28:
+ 285              	.L16:
+ 286              	.LCFI4:
+ 287              		.cfi_def_cfa_offset 0
+ 288              		.cfi_restore 4
+ 289              		.cfi_restore 5
+ 290              		.cfi_restore 6
+ 291              		.cfi_restore 7
+ 292              		.cfi_restore 14
+  42:simpleserial-bfmax-maskered-8bit.c ****     POS_T found_flag = 0; // Flag per indicare se il massimo è stato trovato, serve per ignorare t
+ 293              		.loc 1 42 11 view .LVU82
+ 294 006e 0846     		mov	r0, r1
+ 295              	.LVL29:
+  72:simpleserial-bfmax-maskered-8bit.c **** }
+ 296              		.loc 1 72 5 is_stmt 1 view .LVU83
+  73:simpleserial-bfmax-maskered-8bit.c **** 
+ 297              		.loc 1 73 1 is_stmt 0 view .LVU84
+ 298 0070 7047     		bx	lr
+ 299              		.cfi_endproc
+ 300              	.LFE0:
+ 302 0072 00BF     		.section	.text.cmd_profile_argmax,"ax",%progbits
+ 303              		.align	1
+ 304              		.p2align 2,,3
+ 305              		.global	cmd_profile_argmax
+ 306              		.syntax unified
+ 307              		.thumb
+ 308              		.thumb_func
+ 310              	cmd_profile_argmax:
+ 311              	.LVL30:
+ 312              	.LFB2:
+ 105:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 313              		.loc 1 105 54 is_stmt 1 view -0
+ 314              		.cfi_startproc
+ 315              		@ args = 0, pretend = 0, frame = 8
+ 316              		@ frame_needed = 0, uses_anonymous_args = 0
+ 106:simpleserial-bfmax-maskered-8bit.c **** 
+ 317              		.loc 1 106 5 view .LVU86
+ 106:simpleserial-bfmax-maskered-8bit.c **** 
+ 318              		.loc 1 106 8 is_stmt 0 view .LVU87
+ 319 0000 0129     		cmp	r1, #1
+ 320 0002 40D9     		bls	.L26
+ 109:simpleserial-bfmax-maskered-8bit.c ****     if (target_pos >= N_BITS) {
+ 321              		.loc 1 109 5 is_stmt 1 view .LVU88
+ 322              	.LVL31:
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 323              		.loc 1 110 5 view .LVU89
+ 105:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 324              		.loc 1 105 54 is_stmt 0 view .LVU90
+ 325 0004 10B5     		push	{r4, lr}
+ 326              	.LCFI5:
+ 327              		.cfi_def_cfa_offset 8
+ 328              		.cfi_offset 4, -8
+ 329              		.cfi_offset 14, -4
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 330              		.loc 1 110 8 view .LVU91
+ 331 0006 0388     		ldrh	r3, [r0]	@ unaligned
+ 332 0008 2049     		ldr	r1, .L32
+ 333              	.LVL32:
+ 334              	.LBB14:
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 335              		.loc 1 116 40 view .LVU92
+ 336 000a 214C     		ldr	r4, .L32+4
+ 337              	.LBE14:
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 338              		.loc 1 110 8 view .LVU93
+ 339 000c 5BBA     		rev16	r3, r3
+ 340 000e 9BB2     		uxth	r3, r3
+ 341 0010 40F21142 		movw	r2, #1041
+ 342 0014 9342     		cmp	r3, r2
+ 343 0016 28BF     		it	cs
+ 344 0018 1346     		movcs	r3, r2
+ 105:simpleserial-bfmax-maskered-8bit.c ****     if (len < 2) return 0x01;
+ 345              		.loc 1 105 54 view .LVU94
+ 346 001a 82B0     		sub	sp, sp, #8
+ 347              	.LCFI6:
+ 348              		.cfi_def_cfa_offset 16
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 349              		.loc 1 110 8 view .LVU95
+ 350 001c 9E46     		mov	lr, r3
+ 351              	.LVL33:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 352              		.loc 1 115 5 is_stmt 1 view .LVU96
+ 353              	.LBB15:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 354              		.loc 1 115 10 view .LVU97
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 355              		.loc 1 115 28 discriminator 1 view .LVU98
+ 356 001e 01F21240 		addw	r0, r1, #1042
+ 357              	.LVL34:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 358              		.loc 1 115 28 is_stmt 0 discriminator 1 view .LVU99
+ 359              	.LBE15:
+ 110:simpleserial-bfmax-maskered-8bit.c ****         target_pos = N_BITS - 1;
+ 360              		.loc 1 110 8 view .LVU100
+ 361 0022 0322     		movs	r2, #3
+ 362              	.LVL35:
+ 363              	.L25:
+ 364              	.LBB16:
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 365              		.loc 1 116 9 is_stmt 1 view .LVU101
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 366              		.loc 1 116 40 is_stmt 0 view .LVU102
+ 367 0024 A4FB02C3 		umull	ip, r3, r4, r2
+ 368 0028 DB08     		lsrs	r3, r3, #3
+ 369 002a 03EB8303 		add	r3, r3, r3, lsl #2
+ 370 002e A2EB4303 		sub	r3, r2, r3, lsl #1
+ 116:simpleserial-bfmax-maskered-8bit.c ****     }
+ 371              		.loc 1 116 18 view .LVU103
+ 372 0032 01F8013F 		strb	r3, [r1, #1]!
+ 373              	.LVL36:
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 374              		.loc 1 115 39 is_stmt 1 discriminator 3 view .LVU104
+ 115:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (uint8_t)((i * 7 + 3) % 10); /* Valori tra 0 e 9 */
+ 375              		.loc 1 115 28 discriminator 1 view .LVU105
+ 376 0036 8142     		cmp	r1, r0
+ 377 0038 02F10702 		add	r2, r2, #7
+ 378 003c F2D1     		bne	.L25
+ 379              	.LBE16:
+ 118:simpleserial-bfmax-maskered-8bit.c **** 
+ 380              		.loc 1 118 5 view .LVU106
+ 118:simpleserial-bfmax-maskered-8bit.c **** 
+ 381              		.loc 1 118 21 is_stmt 0 view .LVU107
+ 382 003e 154C     		ldr	r4, .L32+8
+ 383 0040 04EB0E03 		add	r3, r4, lr
+ 384 0044 0F22     		movs	r2, #15
+ 385 0046 83F83C20 		strb	r2, [r3, #60]
+ 121:simpleserial-bfmax-maskered-8bit.c ****     volatile POS_T found_col = argmax_u8_vulnerable(upc, N_BITS);
+ 386              		.loc 1 121 5 is_stmt 1 view .LVU108
+ 387 004a FFF7FEFF 		bl	trigger_high
+ 388              	.LVL37:
+ 122:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 389              		.loc 1 122 5 view .LVU109
+ 122:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 390              		.loc 1 122 32 is_stmt 0 view .LVU110
+ 391 004e 40F21241 		movw	r1, #1042
+ 392 0052 04F13C00 		add	r0, r4, #60
+ 393 0056 FFF7FEFF 		bl	argmax_u8_vulnerable
+ 394              	.LVL38:
+ 122:simpleserial-bfmax-maskered-8bit.c ****     trigger_low();
+ 395              		.loc 1 122 20 discriminator 1 view .LVU111
+ 396 005a ADF80600 		strh	r0, [sp, #6]	@ movhi
+ 123:simpleserial-bfmax-maskered-8bit.c ****     /* --- FINE FINESTRA DI MISURA (Trigger Basso) --- */
+ 397              		.loc 1 123 5 is_stmt 1 view .LVU112
+ 398 005e FFF7FEFF 		bl	trigger_low
+ 399              	.LVL39:
+ 127:simpleserial-bfmax-maskered-8bit.c ****     resp[0] = (uint8_t)(found_col >> 8);
+ 400              		.loc 1 127 5 view .LVU113
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 401              		.loc 1 128 5 view .LVU114
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 402              		.loc 1 128 15 is_stmt 0 view .LVU115
+ 403 0062 BDF80630 		ldrh	r3, [sp, #6]
+ 129:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 404              		.loc 1 129 15 view .LVU116
+ 405 0066 BDF80640 		ldrh	r4, [sp, #6]
+ 406 006a 8DF80540 		strb	r4, [sp, #5]
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 407              		.loc 1 128 15 view .LVU117
+ 408 006e C3F30723 		ubfx	r3, r3, #8, #8
+ 130:simpleserial-bfmax-maskered-8bit.c **** 
+ 409              		.loc 1 130 5 view .LVU118
+ 410 0072 0221     		movs	r1, #2
+ 411 0074 7220     		movs	r0, #114
+ 412 0076 01AA     		add	r2, sp, #4
+ 128:simpleserial-bfmax-maskered-8bit.c ****     resp[1] = (uint8_t)(found_col & 0xFF);
+ 413              		.loc 1 128 15 view .LVU119
+ 414 0078 8DF80430 		strb	r3, [sp, #4]
+ 129:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 415              		.loc 1 129 5 is_stmt 1 view .LVU120
+ 130:simpleserial-bfmax-maskered-8bit.c **** 
+ 416              		.loc 1 130 5 view .LVU121
+ 417 007c FFF7FEFF 		bl	simpleserial_put
+ 418              	.LVL40:
+ 132:simpleserial-bfmax-maskered-8bit.c **** }
+ 419              		.loc 1 132 5 view .LVU122
+ 132:simpleserial-bfmax-maskered-8bit.c **** }
+ 420              		.loc 1 132 12 is_stmt 0 view .LVU123
+ 421 0080 0020     		movs	r0, #0
+ 133:simpleserial-bfmax-maskered-8bit.c **** 
+ 422              		.loc 1 133 1 view .LVU124
+ 423 0082 02B0     		add	sp, sp, #8
+ 424              	.LCFI7:
+ 425              		.cfi_def_cfa_offset 8
+ 426              		@ sp needed
+ 427 0084 10BD     		pop	{r4, pc}
+ 428              	.LVL41:
+ 429              	.L26:
+ 430              	.LCFI8:
+ 431              		.cfi_def_cfa_offset 0
+ 432              		.cfi_restore 4
+ 433              		.cfi_restore 14
+ 106:simpleserial-bfmax-maskered-8bit.c **** 
+ 434              		.loc 1 106 25 discriminator 1 view .LVU125
+ 435 0086 0120     		movs	r0, #1
+ 436              	.LVL42:
+ 133:simpleserial-bfmax-maskered-8bit.c **** 
+ 437              		.loc 1 133 1 view .LVU126
+ 438 0088 7047     		bx	lr
+ 439              	.L33:
+ 440 008a 00BF     		.align	2
+ 441              	.L32:
+ 442 008c 3B000000 		.word	.LANCHOR0+59
+ 443 0090 CDCCCCCC 		.word	-858993459
+ 444 0094 00000000 		.word	.LANCHOR0
+ 445              		.cfi_endproc
+ 446              	.LFE2:
+ 448              		.section	.text.update_sparse_vulnerable,"ax",%progbits
+ 449              		.align	1
+ 450              		.p2align 2,,3
+ 451              		.global	update_sparse_vulnerable
+ 452              		.syntax unified
+ 453              		.thumb
+ 454              		.thumb_func
+ 456              	update_sparse_vulnerable:
+ 457              	.LVL43:
+ 458              	.LFB1:
+  79:simpleserial-bfmax-maskered-8bit.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 459              		.loc 1 79 68 is_stmt 1 view -0
+ 460              		.cfi_startproc
+ 461              		@ args = 0, pretend = 0, frame = 0
+ 462              		@ frame_needed = 0, uses_anonymous_args = 0
+  80:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 463              		.loc 1 80 5 view .LVU128
+  80:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 464              		.loc 1 80 41 is_stmt 0 view .LVU129
+ 465 0000 B0F5027F 		cmp	r0, #520
+  79:simpleserial-bfmax-maskered-8bit.c ****     uint8_t block = (col >= R_BITS) ? 1 : 0;
+ 466              		.loc 1 79 68 view .LVU130
+ 467 0004 30B5     		push	{r4, r5, lr}
+ 468              	.LCFI9:
+ 469              		.cfi_def_cfa_offset 12
+ 470              		.cfi_offset 4, -12
+ 471              		.cfi_offset 5, -8
+ 472              		.cfi_offset 14, -4
+  80:simpleserial-bfmax-maskered-8bit.c ****     POS_T col_bit = (block == 1) ? (col - R_BITS) : col;
+ 473              		.loc 1 80 41 view .LVU131
+ 474 0006 8CBF     		ite	hi
+ 475 0008 0123     		movhi	r3, #1
+ 476 000a 0023     		movls	r3, #0
+ 477              	.LVL44:
+  81:simpleserial-bfmax-maskered-8bit.c **** 
+ 478              		.loc 1 81 5 is_stmt 1 view .LVU132
+  81:simpleserial-bfmax-maskered-8bit.c **** 
+ 479              		.loc 1 81 11 is_stmt 0 view .LVU133
+ 480 000c 03D9     		bls	.L35
+  81:simpleserial-bfmax-maskered-8bit.c **** 
+ 481              		.loc 1 81 11 discriminator 1 view .LVU134
+ 482 000e 6FF40274 		mvn	r4, #520
+ 483 0012 2044     		add	r0, r0, r4
+ 484              	.LVL45:
+  81:simpleserial-bfmax-maskered-8bit.c **** 
+ 485              		.loc 1 81 11 discriminator 1 view .LVU135
+ 486 0014 80B2     		uxth	r0, r0
+ 487              	.LVL46:
+ 488              	.L35:
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 489              		.loc 1 83 5 is_stmt 1 view .LVU136
+ 490              	.LBB17:
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 491              		.loc 1 83 10 view .LVU137
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 492              		.loc 1 83 27 discriminator 1 view .LVU138
+ 493 0016 144D     		ldr	r5, .L42
+ 494 0018 002B     		cmp	r3, #0
+ 495 001a 14BF     		ite	ne
+ 496 001c 1E23     		movne	r3, #30
+ 497              	.LVL47:
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 498              		.loc 1 83 27 is_stmt 0 discriminator 1 view .LVU139
+ 499 001e 0023     		moveq	r3, #0
+ 500 0020 A3F1020C 		sub	ip, r3, #2
+ 501 0024 05F11C04 		add	r4, r5, #28
+ 502 0028 AC44     		add	ip, ip, r5
+ 503 002a 1C44     		add	r4, r4, r3
+ 504              	.LVL48:
+ 505              	.L38:
+ 506              	.LBB18:
+  86:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+ 507              		.loc 1 86 9 is_stmt 1 view .LVU140
+  88:simpleserial-bfmax-maskered-8bit.c ****         }
+ 508              		.loc 1 88 13 view .LVU141
+  86:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+ 509              		.loc 1 86 15 is_stmt 0 view .LVU142
+ 510 002c 3CF8023F 		ldrh	r3, [ip, #2]!
+  86:simpleserial-bfmax-maskered-8bit.c ****         if (row >= R_BITS) {
+ 511              		.loc 1 86 15 view .LVU143
+ 512 0030 0344     		add	r3, r3, r0
+ 513 0032 9BB2     		uxth	r3, r3
+ 514              	.LVL49:
+  87:simpleserial-bfmax-maskered-8bit.c ****             row -= R_BITS;
+ 515              		.loc 1 87 9 is_stmt 1 view .LVU144
+  87:simpleserial-bfmax-maskered-8bit.c ****             row -= R_BITS;
+ 516              		.loc 1 87 12 is_stmt 0 view .LVU145
+ 517 0034 B3F5027F 		cmp	r3, #520
+ 518 0038 03D9     		bls	.L36
+  88:simpleserial-bfmax-maskered-8bit.c ****         }
+ 519              		.loc 1 88 17 view .LVU146
+ 520 003a 6FF40272 		mvn	r2, #520
+ 521 003e 1344     		add	r3, r3, r2
+ 522              	.LVL50:
+  88:simpleserial-bfmax-maskered-8bit.c ****         }
+ 523              		.loc 1 88 17 view .LVU147
+ 524 0040 9BB2     		uxth	r3, r3
+ 525              	.LVL51:
+ 526              	.L36:
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 527              		.loc 1 93 9 is_stmt 1 view .LVU148
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 528              		.loc 1 93 22 is_stmt 0 view .LVU149
+ 529 0042 2B44     		add	r3, r3, r5
+ 530              	.LVL52:
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 531              		.loc 1 93 22 view .LVU150
+ 532 0044 93F85024 		ldrb	r2, [r3, #1104]	@ zero_extendqisi2
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 533              		.loc 1 96 20 view .LVU151
+ 534 0048 93F83CE0 		ldrb	lr, [r3, #60]	@ zero_extendqisi2
+  94:simpleserial-bfmax-maskered-8bit.c **** 
+ 535              		.loc 1 94 16 view .LVU152
+ 536 004c 012A     		cmp	r2, #1
+ 537 004e 14BF     		ite	ne
+ 538 0050 0121     		movne	r1, #1
+ 539 0052 FF21     		moveq	r1, #255
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 540              		.loc 1 93 28 view .LVU153
+ 541 0054 82F00102 		eor	r2, r2, #1
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 542              		.loc 1 96 20 view .LVU154
+ 543 0058 7144     		add	r1, r1, lr
+ 544              	.LBE18:
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 545              		.loc 1 83 27 discriminator 1 view .LVU155
+ 546 005a 6445     		cmp	r4, ip
+ 547              	.LBB19:
+  93:simpleserial-bfmax-maskered-8bit.c ****         int8_t delta = syndrome_bits[row] ? +1 : -1;
+ 548              		.loc 1 93 28 view .LVU156
+ 549 005c 83F85024 		strb	r2, [r3, #1104]
+  94:simpleserial-bfmax-maskered-8bit.c **** 
+ 550              		.loc 1 94 9 is_stmt 1 view .LVU157
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 551              		.loc 1 96 9 view .LVU158
+  96:simpleserial-bfmax-maskered-8bit.c ****     }
+ 552              		.loc 1 96 18 is_stmt 0 view .LVU159
+ 553 0060 83F83C10 		strb	r1, [r3, #60]
+ 554              	.LBE19:
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 555              		.loc 1 83 40 is_stmt 1 discriminator 2 view .LVU160
+  83:simpleserial-bfmax-maskered-8bit.c ****         /* Relazione algebrica §5.4 del PDF:
+ 556              		.loc 1 83 27 discriminator 1 view .LVU161
+ 557 0064 E2D1     		bne	.L38
+ 558              	.LBE17:
+  98:simpleserial-bfmax-maskered-8bit.c **** 
+ 559              		.loc 1 98 1 is_stmt 0 view .LVU162
+ 560 0066 30BD     		pop	{r4, r5, pc}
+ 561              	.L43:
+ 562              		.align	2
+ 563              	.L42:
+ 564 0068 00000000 		.word	.LANCHOR0
+ 565              		.cfi_endproc
+ 566              	.LFE1:
+ 568              		.section	.text.cmd_run_decoder,"ax",%progbits
+ 569              		.align	1
+ 570              		.p2align 2,,3
+ 571              		.global	cmd_run_decoder
+ 572              		.syntax unified
+ 573              		.thumb
+ 574              		.thumb_func
+ 576              	cmd_run_decoder:
+ 577              	.LVL53:
+ 578              	.LFB4:
+ 148:simpleserial-bfmax-maskered-8bit.c **** 
+ 149:simpleserial-bfmax-maskered-8bit.c **** /* =========================================================================
+ 150:simpleserial-bfmax-maskered-8bit.c ****  * COMANDO SIMPLESERIAL 'd': Esecuzione Singola Traccia di bfmax_decoder
+ 151:simpleserial-bfmax-maskered-8bit.c ****  * (§5.3 e §5.5 del PDF: esegue le iterazioni con trigger per segmentazione)
+ 152:simpleserial-bfmax-maskered-8bit.c ****  * ========================================================================= */
+ 153:simpleserial-bfmax-maskered-8bit.c **** uint8_t cmd_run_decoder(uint8_t* in, uint8_t len) {
+ 579              		.loc 1 153 51 is_stmt 1 view -0
+ 580              		.cfi_startproc
+ 581              		@ args = 0, pretend = 0, frame = 8
+ 582              		@ frame_needed = 0, uses_anonymous_args = 0
+ 154:simpleserial-bfmax-maskered-8bit.c ****     /* Inizializza UPC a partire dai byte ricevuti per simulare una sindrome in ingresso */
+ 155:simpleserial-bfmax-maskered-8bit.c ****     for (uint16_t i = 0; i < N_BITS; i++) {
+ 583              		.loc 1 155 5 view .LVU164
+ 584              	.LBB20:
+ 585              		.loc 1 155 10 view .LVU165
+ 586              		.loc 1 155 28 discriminator 1 view .LVU166
+ 587              	.LBE20:
+ 153:simpleserial-bfmax-maskered-8bit.c ****     /* Inizializza UPC a partire dai byte ricevuti per simulare una sindrome in ingresso */
+ 588              		.loc 1 153 51 is_stmt 0 view .LVU167
+ 589 0000 F0B5     		push	{r4, r5, r6, r7, lr}
+ 590              	.LCFI10:
+ 591              		.cfi_def_cfa_offset 20
+ 592              		.cfi_offset 4, -20
+ 593              		.cfi_offset 5, -16
+ 594              		.cfi_offset 6, -12
+ 595              		.cfi_offset 7, -8
+ 596              		.cfi_offset 14, -4
+ 597 0002 244C     		ldr	r4, .L54
+ 598              	.LBB21:
+ 156:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 599              		.loc 1 156 16 view .LVU168
+ 600 0004 244D     		ldr	r5, .L54+4
+ 601              	.LBE21:
+ 153:simpleserial-bfmax-maskered-8bit.c ****     /* Inizializza UPC a partire dai byte ricevuti per simulare una sindrome in ingresso */
+ 602              		.loc 1 153 51 view .LVU169
+ 603 0006 83B0     		sub	sp, sp, #12
+ 604              	.LCFI11:
+ 605              		.cfi_def_cfa_offset 32
+ 606              	.LBB22:
+ 607              		.loc 1 156 24 view .LVU170
+ 608 0008 4FF0000C 		mov	ip, #0
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 609              		.loc 1 155 28 discriminator 1 view .LVU171
+ 610 000c 40F2124E 		movw	lr, #1042
+ 611              	.LVL54:
+ 612              	.L45:
+ 613              		.loc 1 156 9 is_stmt 1 view .LVU172
+ 614              		.loc 1 156 24 is_stmt 0 view .LVU173
+ 615 0010 BCFBF1F3 		udiv	r3, ip, r1
+ 616 0014 01FB13C3 		mls	r3, r1, r3, ip
+ 617              		.loc 1 156 16 view .LVU174
+ 618 0018 C35C     		ldrb	r3, [r0, r3]	@ zero_extendqisi2
+ 619 001a 83EA0C03 		eor	r3, r3, ip
+ 620 001e DBB2     		uxtb	r3, r3
+ 621 0020 A5FB0362 		umull	r6, r2, r5, r3
+ 622 0024 D208     		lsrs	r2, r2, #3
+ 623 0026 02EB4202 		add	r2, r2, r2, lsl #1
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 624              		.loc 1 155 28 discriminator 1 view .LVU175
+ 625 002a 0CF1010C 		add	ip, ip, #1
+ 626              	.LVL55:
+ 627              		.loc 1 156 16 view .LVU176
+ 628 002e A3EB8203 		sub	r3, r3, r2, lsl #2
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 629              		.loc 1 155 28 discriminator 1 view .LVU177
+ 630 0032 F445     		cmp	ip, lr
+ 631              		.loc 1 156 16 view .LVU178
+ 632 0034 04F8013F 		strb	r3, [r4, #1]!
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 633              		.loc 1 155 39 is_stmt 1 discriminator 3 view .LVU179
+ 634              	.LVL56:
+ 155:simpleserial-bfmax-maskered-8bit.c ****         upc[i] = (in[i % len] ^ (uint8_t)(i & 0xFF)) % 12;
+ 635              		.loc 1 155 28 discriminator 1 view .LVU180
+ 636 0038 EAD1     		bne	.L45
+ 637 003a 0024     		movs	r4, #0
+ 638 003c 174E     		ldr	r6, .L54+8
+ 639              	.LBE22:
+ 640              	.LBB23:
+ 157:simpleserial-bfmax-maskered-8bit.c ****     }
+ 158:simpleserial-bfmax-maskered-8bit.c **** 
+ 159:simpleserial-bfmax-maskered-8bit.c ****     POS_T last_col = 0;
+ 160:simpleserial-bfmax-maskered-8bit.c **** 
+ 161:simpleserial-bfmax-maskered-8bit.c ****     /* Trigger globale o per-iterazione (come suggerito in §5.5 del PDF) */
+ 162:simpleserial-bfmax-maskered-8bit.c ****     for (uint8_t iter = 0; iter < ITER_MAX_BFMAX; iter++) {
+ 163:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 164:simpleserial-bfmax-maskered-8bit.c ****         
+ 165:simpleserial-bfmax-maskered-8bit.c ****         /* 1. Fase di ricerca del massimo (Timing Leak) */
+ 166:simpleserial-bfmax-maskered-8bit.c ****         last_col = argmax_u8_vulnerable(upc, N_BITS);
+ 167:simpleserial-bfmax-maskered-8bit.c ****         
+ 168:simpleserial-bfmax-maskered-8bit.c ****         /* Azzera il contatore del bit appena flippato per evitare loop statici */
+ 169:simpleserial-bfmax-maskered-8bit.c ****         upc[last_col] = 0;
+ 641              		.loc 1 169 23 is_stmt 0 view .LVU181
+ 642 003e 2746     		mov	r7, r4
+ 643              	.LVL57:
+ 644              	.L49:
+ 163:simpleserial-bfmax-maskered-8bit.c ****         
+ 645              		.loc 1 163 9 is_stmt 1 view .LVU182
+ 163:simpleserial-bfmax-maskered-8bit.c ****         
+ 646              		.loc 1 163 12 is_stmt 0 view .LVU183
+ 647 0040 C4B1     		cbz	r4, .L46
+ 648              	.LVL58:
+ 649              	.L52:
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 650              		.loc 1 166 9 is_stmt 1 view .LVU184
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 651              		.loc 1 166 20 is_stmt 0 view .LVU185
+ 652 0042 40F21241 		movw	r1, #1042
+ 653 0046 1648     		ldr	r0, .L54+12
+ 654 0048 FFF7FEFF 		bl	argmax_u8_vulnerable
+ 655              	.LVL59:
+ 656              		.loc 1 169 23 view .LVU186
+ 657 004c 3318     		adds	r3, r6, r0
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 658              		.loc 1 162 33 discriminator 1 view .LVU187
+ 659 004e 0134     		adds	r4, r4, #1
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 660              		.loc 1 166 20 view .LVU188
+ 661 0050 0546     		mov	r5, r0
+ 662              	.LVL60:
+ 663              		.loc 1 169 9 is_stmt 1 view .LVU189
+ 664              		.loc 1 169 23 is_stmt 0 view .LVU190
+ 665 0052 83F83C70 		strb	r7, [r3, #60]
+ 170:simpleserial-bfmax-maskered-8bit.c **** 
+ 171:simpleserial-bfmax-maskered-8bit.c ****         /* 2. Fase di aggiornamento sparso (Address Power Leak) */
+ 172:simpleserial-bfmax-maskered-8bit.c ****         update_sparse_vulnerable(last_col);
+ 666              		.loc 1 172 9 is_stmt 1 view .LVU191
+ 667 0056 FFF7FEFF 		bl	update_sparse_vulnerable
+ 668              	.LVL61:
+ 173:simpleserial-bfmax-maskered-8bit.c ****         
+ 174:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_low();
+ 669              		.loc 1 174 9 view .LVU192
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 670              		.loc 1 162 55 discriminator 2 view .LVU193
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 671              		.loc 1 162 33 discriminator 1 view .LVU194
+ 672 005a 142C     		cmp	r4, #20
+ 673 005c F0D1     		bne	.L49
+ 674              	.LBE23:
+ 175:simpleserial-bfmax-maskered-8bit.c ****     }
+ 176:simpleserial-bfmax-maskered-8bit.c **** 
+ 177:simpleserial-bfmax-maskered-8bit.c ****     uint8_t resp[2] = { (uint8_t)(last_col >> 8), (uint8_t)(last_col & 0xFF) };
+ 675              		.loc 1 177 5 view .LVU195
+ 676              		.loc 1 177 13 is_stmt 0 view .LVU196
+ 677 005e 6DBA     		rev16	r5, r5
+ 678              	.LVL62:
+ 178:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 679              		.loc 1 178 5 view .LVU197
+ 680 0060 01AA     		add	r2, sp, #4
+ 681 0062 0221     		movs	r1, #2
+ 682 0064 7220     		movs	r0, #114
+ 177:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_put('r', 2, resp);
+ 683              		.loc 1 177 13 view .LVU198
+ 684 0066 ADF80450 		strh	r5, [sp, #4]	@ movhi
+ 685              		.loc 1 178 5 is_stmt 1 view .LVU199
+ 686 006a FFF7FEFF 		bl	simpleserial_put
+ 687              	.LVL63:
+ 179:simpleserial-bfmax-maskered-8bit.c ****     return 0x00;
+ 688              		.loc 1 179 5 view .LVU200
+ 180:simpleserial-bfmax-maskered-8bit.c **** }
+ 689              		.loc 1 180 1 is_stmt 0 view .LVU201
+ 690 006e 0020     		movs	r0, #0
+ 691 0070 03B0     		add	sp, sp, #12
+ 692              	.LCFI12:
+ 693              		.cfi_remember_state
+ 694              		.cfi_def_cfa_offset 20
+ 695              		@ sp needed
+ 696 0072 F0BD     		pop	{r4, r5, r6, r7, pc}
+ 697              	.LVL64:
+ 698              	.L46:
+ 699              	.LCFI13:
+ 700              		.cfi_restore_state
+ 701              	.LBB24:
+ 163:simpleserial-bfmax-maskered-8bit.c ****         
+ 702              		.loc 1 163 24 is_stmt 1 discriminator 1 view .LVU202
+ 703 0074 FFF7FEFF 		bl	trigger_high
+ 704              	.LVL65:
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 705              		.loc 1 166 9 view .LVU203
+ 166:simpleserial-bfmax-maskered-8bit.c ****         
+ 706              		.loc 1 166 20 is_stmt 0 view .LVU204
+ 707 0078 40F21241 		movw	r1, #1042
+ 708 007c 0848     		ldr	r0, .L54+12
+ 709 007e FFF7FEFF 		bl	argmax_u8_vulnerable
+ 710              	.LVL66:
+ 169:simpleserial-bfmax-maskered-8bit.c **** 
+ 711              		.loc 1 169 9 is_stmt 1 view .LVU205
+ 169:simpleserial-bfmax-maskered-8bit.c **** 
+ 712              		.loc 1 169 23 is_stmt 0 view .LVU206
+ 713 0082 3318     		adds	r3, r6, r0
+ 714 0084 83F83C40 		strb	r4, [r3, #60]
+ 172:simpleserial-bfmax-maskered-8bit.c ****         
+ 715              		.loc 1 172 9 is_stmt 1 view .LVU207
+ 716 0088 FFF7FEFF 		bl	update_sparse_vulnerable
+ 717              	.LVL67:
+ 174:simpleserial-bfmax-maskered-8bit.c ****     }
+ 718              		.loc 1 174 9 view .LVU208
+ 174:simpleserial-bfmax-maskered-8bit.c ****     }
+ 719              		.loc 1 174 24 discriminator 1 view .LVU209
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 720              		.loc 1 162 33 is_stmt 0 discriminator 1 view .LVU210
+ 721 008c 0124     		movs	r4, #1
+ 174:simpleserial-bfmax-maskered-8bit.c ****     }
+ 722              		.loc 1 174 24 discriminator 1 view .LVU211
+ 723 008e FFF7FEFF 		bl	trigger_low
+ 724              	.LVL68:
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 725              		.loc 1 162 55 is_stmt 1 discriminator 2 view .LVU212
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 726              		.loc 1 162 33 discriminator 1 view .LVU213
+ 162:simpleserial-bfmax-maskered-8bit.c ****         if (iter == 0) trigger_high();
+ 727              		.loc 1 162 33 is_stmt 0 discriminator 1 view .LVU214
+ 728 0092 D6E7     		b	.L52
+ 729              	.L55:
+ 730              		.align	2
+ 731              	.L54:
+ 732 0094 3B000000 		.word	.LANCHOR0+59
+ 733 0098 ABAAAAAA 		.word	-1431655765
+ 734 009c 00000000 		.word	.LANCHOR0
+ 735 00a0 3C000000 		.word	.LANCHOR0+60
+ 736              	.LBE24:
+ 737              		.cfi_endproc
+ 738              	.LFE4:
+ 740              		.section	.text.startup.main,"ax",%progbits
+ 741              		.align	1
+ 742              		.p2align 2,,3
+ 743              		.global	main
+ 744              		.syntax unified
+ 745              		.thumb
+ 746              		.thumb_func
+ 748              	main:
+ 749              	.LFB5:
+ 181:simpleserial-bfmax-maskered-8bit.c **** 
+ 182:simpleserial-bfmax-maskered-8bit.c **** int main(void) {
+ 750              		.loc 1 182 16 is_stmt 1 view -0
+ 751              		.cfi_startproc
+ 752              		@ Volatile: function does not return.
+ 753              		@ args = 0, pretend = 0, frame = 8
+ 754              		@ frame_needed = 0, uses_anonymous_args = 0
+ 183:simpleserial-bfmax-maskered-8bit.c ****     platform_init();
+ 755              		.loc 1 183 5 view .LVU216
+ 182:simpleserial-bfmax-maskered-8bit.c ****     platform_init();
+ 756              		.loc 1 182 16 is_stmt 0 view .LVU217
+ 757 0000 00B5     		push	{lr}
+ 758              	.LCFI14:
+ 759              		.cfi_def_cfa_offset 4
+ 760              		.cfi_offset 14, -4
+ 761 0002 83B0     		sub	sp, sp, #12
+ 762              	.LCFI15:
+ 763              		.cfi_def_cfa_offset 16
+ 764              		.loc 1 183 5 view .LVU218
+ 765 0004 FFF7FEFF 		bl	platform_init
+ 766              	.LVL69:
+ 184:simpleserial-bfmax-maskered-8bit.c ****     init_uart();
+ 767              		.loc 1 184 5 is_stmt 1 view .LVU219
+ 768 0008 FFF7FEFF 		bl	init_uart
+ 769              	.LVL70:
+ 185:simpleserial-bfmax-maskered-8bit.c ****     trigger_setup();
+ 770              		.loc 1 185 5 view .LVU220
+ 771 000c FFF7FEFF 		bl	trigger_setup
+ 772              	.LVL71:
+ 186:simpleserial-bfmax-maskered-8bit.c **** 
+ 187:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_init();
+ 773              		.loc 1 187 5 view .LVU221
+ 774 0010 FFF7FEFF 		bl	simpleserial_init
+ 775              	.LVL72:
+ 188:simpleserial-bfmax-maskered-8bit.c **** 
+ 189:simpleserial-bfmax-maskered-8bit.c ****     /* Inizializza una chiave di default */
+ 190:simpleserial-bfmax-maskered-8bit.c ****     uint8_t default_seed = 0x42;
+ 776              		.loc 1 190 5 view .LVU222
+ 777              		.loc 1 190 13 is_stmt 0 view .LVU223
+ 778 0014 4223     		movs	r3, #66
+ 191:simpleserial-bfmax-maskered-8bit.c ****     cmd_set_key(&default_seed, 1);
+ 779              		.loc 1 191 5 view .LVU224
+ 780 0016 0121     		movs	r1, #1
+ 781 0018 0DF10700 		add	r0, sp, #7
+ 190:simpleserial-bfmax-maskered-8bit.c ****     cmd_set_key(&default_seed, 1);
+ 782              		.loc 1 190 13 view .LVU225
+ 783 001c 8DF80730 		strb	r3, [sp, #7]
+ 784              		.loc 1 191 5 is_stmt 1 view .LVU226
+ 785 0020 FFF7FEFF 		bl	cmd_set_key
+ 786              	.LVL73:
+ 192:simpleserial-bfmax-maskered-8bit.c **** 
+ 193:simpleserial-bfmax-maskered-8bit.c ****     /* Registra i comandi SimpleSerial:
+ 194:simpleserial-bfmax-maskered-8bit.c ****      * 'p' (2 byte) -> Profiling di argmax_u8 con massimo forzato in posizione p
+ 195:simpleserial-bfmax-maskered-8bit.c ****      * 'k' (16 byte)-> Inizializzazione del supporto segreto Htr_sparse
+ 196:simpleserial-bfmax-maskered-8bit.c ****      * 'd' (16 byte)-> Esecuzione completa del ciclo iterativo bfmax_decoder */
+ 197:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_addcmd('p', 2,  cmd_profile_argmax);
+ 787              		.loc 1 197 5 view .LVU227
+ 788 0024 084A     		ldr	r2, .L59
+ 789 0026 0221     		movs	r1, #2
+ 790 0028 7020     		movs	r0, #112
+ 791 002a FFF7FEFF 		bl	simpleserial_addcmd
+ 792              	.LVL74:
+ 198:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_addcmd('k', 16, cmd_set_key);
+ 793              		.loc 1 198 5 view .LVU228
+ 794 002e 074A     		ldr	r2, .L59+4
+ 795 0030 1021     		movs	r1, #16
+ 796 0032 6B20     		movs	r0, #107
+ 797 0034 FFF7FEFF 		bl	simpleserial_addcmd
+ 798              	.LVL75:
+ 199:simpleserial-bfmax-maskered-8bit.c ****     simpleserial_addcmd('d', 16, cmd_run_decoder);
+ 799              		.loc 1 199 5 view .LVU229
+ 800 0038 054A     		ldr	r2, .L59+8
+ 801 003a 1021     		movs	r1, #16
+ 802 003c 6420     		movs	r0, #100
+ 803 003e FFF7FEFF 		bl	simpleserial_addcmd
+ 804              	.LVL76:
+ 805              	.L57:
+ 200:simpleserial-bfmax-maskered-8bit.c **** 
+ 201:simpleserial-bfmax-maskered-8bit.c ****     while(1) {
+ 806              		.loc 1 201 5 view .LVU230
+ 202:simpleserial-bfmax-maskered-8bit.c ****         simpleserial_get();
+ 807              		.loc 1 202 9 discriminator 1 view .LVU231
+ 808 0042 FFF7FEFF 		bl	simpleserial_get
+ 809              	.LVL77:
+ 201:simpleserial-bfmax-maskered-8bit.c ****         simpleserial_get();
+ 810              		.loc 1 201 10 view .LVU232
+ 811 0046 FCE7     		b	.L57
+ 812              	.L60:
+ 813              		.align	2
+ 814              	.L59:
+ 815 0048 00000000 		.word	cmd_profile_argmax
+ 816 004c 00000000 		.word	cmd_set_key
+ 817 0050 00000000 		.word	cmd_run_decoder
+ 818              		.cfi_endproc
+ 819              	.LFE5:
+ 821              		.bss
+ 822              		.align	2
+ 823              		.set	.LANCHOR0,. + 0
+ 826              	Htr_sparse:
+ 827 0000 00000000 		.space	60
+ 827      00000000 
+ 827      00000000 
+ 827      00000000 
+ 827      00000000 
+ 830              	upc:
+ 831 003c 00000000 		.space	1042
+ 831      00000000 
+ 831      00000000 
+ 831      00000000 
+ 831      00000000 
+ 832 044e 0000     		.space	2
+ 835              	syndrome_bits:
+ 836 0450 00000000 		.space	521
+ 836      00000000 
+ 836      00000000 
+ 836      00000000 
+ 836      00000000 
+ 837              		.text
+ 838              	.Letext0:
+ 839              		.file 2 "/usr/lib/gcc/arm-none-eabi/14.2.1/include/stdint.h"
+ 840              		.file 3 ".././simpleserial/simpleserial.h"
+ 841              		.file 4 ".././hal/stm32f3/stm32f3_hal.h"
+ 842              		.file 5 ".././hal/hal.h"
+DEFINED SYMBOLS
+                            *ABS*:00000000 simpleserial-bfmax-maskered-8bit.c
+     /tmp/cc8lrVXv.s:19     .text.cmd_set_key:00000000 $t
+     /tmp/cc8lrVXv.s:26     .text.cmd_set_key:00000000 cmd_set_key
+     /tmp/cc8lrVXv.s:129    .text.cmd_set_key:0000005c $d
+     /tmp/cc8lrVXv.s:136    .text.argmax_u8_vulnerable:00000000 $t
+     /tmp/cc8lrVXv.s:143    .text.argmax_u8_vulnerable:00000000 argmax_u8_vulnerable
+     /tmp/cc8lrVXv.s:303    .text.cmd_profile_argmax:00000000 $t
+     /tmp/cc8lrVXv.s:310    .text.cmd_profile_argmax:00000000 cmd_profile_argmax
+     /tmp/cc8lrVXv.s:442    .text.cmd_profile_argmax:0000008c $d
+     /tmp/cc8lrVXv.s:449    .text.update_sparse_vulnerable:00000000 $t
+     /tmp/cc8lrVXv.s:456    .text.update_sparse_vulnerable:00000000 update_sparse_vulnerable
+     /tmp/cc8lrVXv.s:564    .text.update_sparse_vulnerable:00000068 $d
+     /tmp/cc8lrVXv.s:569    .text.cmd_run_decoder:00000000 $t
+     /tmp/cc8lrVXv.s:576    .text.cmd_run_decoder:00000000 cmd_run_decoder
+     /tmp/cc8lrVXv.s:732    .text.cmd_run_decoder:00000094 $d
+     /tmp/cc8lrVXv.s:741    .text.startup.main:00000000 $t
+     /tmp/cc8lrVXv.s:748    .text.startup.main:00000000 main
+     /tmp/cc8lrVXv.s:815    .text.startup.main:00000048 $d
+     /tmp/cc8lrVXv.s:822    .bss:00000000 $d
+     /tmp/cc8lrVXv.s:826    .bss:00000000 Htr_sparse
+     /tmp/cc8lrVXv.s:830    .bss:0000003c upc
+     /tmp/cc8lrVXv.s:835    .bss:00000450 syndrome_bits
+
+UNDEFINED SYMBOLS
+trigger_high
+trigger_low
+simpleserial_put
+platform_init
+init_uart
+trigger_setup
+simpleserial_init
+simpleserial_addcmd
+simpleserial_get
